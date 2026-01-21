@@ -1,3 +1,4 @@
+
 # vue-project-backend
 
 Go backend for the Vue project. Provides simple auth and server APIs that
@@ -36,3 +37,4 @@ PORT=8080 ALLOWED_ORIGINS=http://localhost:5173 go run ./cmd/server
 - `GET /health`
 - `GET /api/v1/health`
 - `GET /api/v1/status`
+
