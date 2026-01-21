@@ -182,6 +182,9 @@ func usersHandler(users store.UserStore) http.HandlerFunc {
 				writeError(w, http.StatusBadRequest, "name and email are required")
 				return
 			}
+			if !strings.EqualFold(payload.Role, "User") {
+				payload.ServerIDs = nil
+			}
 			created, err := users.Create(r.Context(), payload)
 			if err != nil {
 				if store.IsDuplicateEmail(err) {
@@ -191,6 +194,11 @@ func usersHandler(users store.UserStore) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, "failed to create user")
 				return
 			}
+			if err := users.UpdateUserServers(r.Context(), created.ID, payload.ServerIDs); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to assign servers")
+				return
+			}
+			created.ServerIDs = payload.ServerIDs
 			writeJSON(w, http.StatusCreated, created)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -218,6 +226,9 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 				writeError(w, http.StatusBadRequest, "name and email are required")
 				return
 			}
+			if !strings.EqualFold(payload.Role, "User") {
+				payload.ServerIDs = nil
+			}
 			updated, err := users.Update(r.Context(), id, payload)
 			if err != nil {
 				if store.IsNotFound(err) {
@@ -231,6 +242,11 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, "failed to update user")
 				return
 			}
+			if err := users.UpdateUserServers(r.Context(), id, payload.ServerIDs); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to assign servers")
+				return
+			}
+			updated.ServerIDs = payload.ServerIDs
 			writeJSON(w, http.StatusOK, updated)
 		case http.MethodDelete:
 			if err := users.Delete(r.Context(), id); err != nil {
