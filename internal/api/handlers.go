@@ -21,6 +21,8 @@ type loginResponse struct {
 
 type userShape struct {
 	Email string `json:"email"`
+	Role  string `json:"role"`
+	Name  string `json:"name"`
 }
 
 type errorResponse struct {
@@ -32,7 +34,7 @@ func registerRoutes(mux *http.ServeMux, users store.UserStore) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
-	mux.HandleFunc("/auth/login", loginHandler)
+	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler)
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
@@ -57,37 +59,52 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func loginHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
+func loginHandler(users store.UserStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
 
-	var payload loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
+		var payload loginRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
 
-	email := strings.ToLower(strings.TrimSpace(payload.Email))
-	password := strings.TrimSpace(payload.Password)
-	if email == "" || password == "" {
-		writeError(w, http.StatusBadRequest, "email and password are required")
-		return
-	}
+		email := strings.ToLower(strings.TrimSpace(payload.Email))
+		password := strings.TrimSpace(payload.Password)
+		if email == "" || password == "" {
+			writeError(w, http.StatusBadRequest, "email and password are required")
+			return
+		}
 
-	if !data.IsValidUser(email, password) {
-		writeJSON(w, http.StatusUnauthorized, errorResponse{
-			Error:   "unauthorized",
-			Message: "Invalid email or password. Please try again.",
+		user, err := users.FindByCredentials(r.Context(), email, password)
+		if err != nil {
+			if store.IsNotFound(err) {
+				writeJSON(w, http.StatusUnauthorized, errorResponse{
+					Error:   "unauthorized",
+					Message: "Invalid email or password. Please try again.",
+				})
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to authenticate")
+			return
+		}
+
+		if strings.EqualFold(user.Status, "Blocked") {
+			writeJSON(w, http.StatusForbidden, errorResponse{
+				Error:   "forbidden",
+				Message: "Your account is blocked. Please contact an administrator.",
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, loginResponse{
+			Token: "mock-token",
+			User:  userShape{Email: user.Email, Role: user.Role, Name: user.Name},
 		})
-		return
 	}
-
-	writeJSON(w, http.StatusOK, loginResponse{
-		Token: "mock-token",
-		User:  userShape{Email: email},
-	})
 }
 
 func serversHandler(w http.ResponseWriter, r *http.Request) {

@@ -19,6 +19,7 @@ type Server struct {
 type userCredential struct {
 	Email    string
 	Password string
+	Role     string
 }
 
 var servers = []Server{
@@ -160,8 +161,8 @@ var servers = []Server{
 }
 
 var users = []userCredential{
-	{Email: "superadmin@gmail.com", Password: "123456"},
-	{Email: "user@gmail.com", Password: "123456"},
+	{Email: "superadmin@gmail.com", Password: "123456", Role: "Admin"},
+	{Email: "user@gmail.com", Password: "123456", Role: "User"},
 }
 
 func ServerList() []Server {
@@ -177,4 +178,14 @@ func IsValidUser(email, password string) bool {
 		}
 	}
 	return false
+}
+
+func FindUserByCredentials(email, password string) *userCredential {
+	for _, user := range users {
+		if user.Email == email && user.Password == password {
+			matched := user
+			return &matched
+		}
+	}
+	return nil
 }
