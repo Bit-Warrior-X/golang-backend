@@ -10,22 +10,20 @@ import (
 )
 
 type User struct {
-	ID       int64    `json:"id"`
-	Name     string   `json:"name"`
-	Email    string   `json:"email"`
-	Password string   `json:"password"`
-	Role     string   `json:"role"`
-	Status   string   `json:"status"`
-	Servers  []string `json:"servers"`
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Role     string `json:"role"`
+	Status   string `json:"status"`
 }
 
 type UserInput struct {
-	Name     string   `json:"name"`
-	Email    string   `json:"email"`
-	Password string   `json:"password"`
-	Role     string   `json:"role"`
-	Status   string   `json:"status"`
-	Servers  []string `json:"servers"`
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Role     string `json:"role"`
+	Status   string `json:"status"`
 }
 
 func (input UserInput) Normalize() UserInput {
@@ -35,7 +33,6 @@ func (input UserInput) Normalize() UserInput {
 		Password: strings.TrimSpace(input.Password),
 		Role:     strings.TrimSpace(input.Role),
 		Status:   strings.TrimSpace(input.Status),
-		Servers:  normalizeServers(input.Servers),
 	}
 }
 
@@ -57,7 +54,7 @@ func NewUserStore(db *sql.DB) UserStore {
 
 func (store *userStore) List(ctx context.Context) ([]User, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, name, email, password, role, status, server_id_list
+		SELECT id, name, email, password, role, status
 		FROM users
 		ORDER BY id DESC`)
 	if err != nil {
@@ -68,11 +65,9 @@ func (store *userStore) List(ctx context.Context) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var item User
-		var servers sql.NullString
-		if err := rows.Scan(&item.ID, &item.Name, &item.Email, &item.Password, &item.Role, &item.Status, &servers); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Email, &item.Password, &item.Role, &item.Status); err != nil {
 			return nil, err
 		}
-		item.Servers = splitServers(servers.String)
 		users = append(users, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -83,36 +78,33 @@ func (store *userStore) List(ctx context.Context) ([]User, error) {
 
 func (store *userStore) FindByCredentials(ctx context.Context, email, password string) (User, error) {
 	var user User
-	var servers sql.NullString
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, name, email, password, role, status, server_id_list
+		SELECT id, name, email, password, role, status
 		FROM users
 		WHERE email = ? AND password = ?
 		LIMIT 1`,
 		email,
 		password,
 	)
-	if err := row.Scan(&user.ID, &user.Name, &user.Email, &user.Password, &user.Role, &user.Status, &servers); err != nil {
+	if err := row.Scan(&user.ID, &user.Name, &user.Email, &user.Password, &user.Role, &user.Status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, errNotFound
 		}
 		return User{}, err
 	}
-	user.Servers = splitServers(servers.String)
 	return user, nil
 }
 
 func (store *userStore) Create(ctx context.Context, input UserInput) (User, error) {
-	servers := joinServers(input.Servers)
+	password := nullableString(input.Password)
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO users (name, email, password, role, status, server_id_list)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		INSERT INTO users (name, email, password, role, status)
+		VALUES (?, ?, ?, ?, ?)`,
 		input.Name,
 		input.Email,
-		input.Password,
+		password,
 		coalesce(input.Role, "User"),
-		coalesce(input.Status, "Active"),
-		servers,
+		coalesce(input.Status, "Waiting"),
 	)
 	if err != nil {
 		return User{}, err
@@ -129,23 +121,21 @@ func (store *userStore) Create(ctx context.Context, input UserInput) (User, erro
 		Email:    input.Email,
 		Password: input.Password,
 		Role:     coalesce(input.Role, "User"),
-		Status:   coalesce(input.Status, "Active"),
-		Servers:  input.Servers,
+		Status:   coalesce(input.Status, "Waiting"),
 	}, nil
 }
 
 func (store *userStore) Update(ctx context.Context, id int64, input UserInput) (User, error) {
-	servers := joinServers(input.Servers)
+	password := nullableString(input.Password)
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE users
-		SET name = ?, email = ?, password = ?, role = ?, status = ?, server_id_list = ?
+		SET name = ?, email = ?, password = ?, role = ?, status = ?
 		WHERE id = ?`,
 		input.Name,
 		input.Email,
-		input.Password,
+		password,
 		coalesce(input.Role, "User"),
-		coalesce(input.Status, "Active"),
-		servers,
+		coalesce(input.Status, "Waiting"),
 		id,
 	)
 	if err != nil {
@@ -165,8 +155,7 @@ func (store *userStore) Update(ctx context.Context, id int64, input UserInput) (
 		Email:    input.Email,
 		Password: input.Password,
 		Role:     coalesce(input.Role, "User"),
-		Status:   coalesce(input.Status, "Active"),
-		Servers:  input.Servers,
+		Status:   coalesce(input.Status, "Waiting"),
 	}, nil
 }
 
@@ -199,42 +188,17 @@ func IsDuplicateEmail(err error) bool {
 	return false
 }
 
-func normalizeServers(servers []string) []string {
-	if len(servers) == 0 {
-		return nil
-	}
-	unique := make([]string, 0, len(servers))
-	seen := map[string]struct{}{}
-	for _, server := range servers {
-		trimmed := strings.TrimSpace(server)
-		if trimmed == "" {
-			continue
-		}
-		if _, ok := seen[trimmed]; ok {
-			continue
-		}
-		seen[trimmed] = struct{}{}
-		unique = append(unique, trimmed)
-	}
-	return unique
-}
-
-func joinServers(servers []string) string {
-	normalized := normalizeServers(servers)
-	return strings.Join(normalized, ",")
-}
-
-func splitServers(value string) []string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	return normalizeServers(parts)
-}
-
 func coalesce(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
 	}
 	return value
+}
+
+func nullableString(value string) sql.NullString {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return sql.NullString{Valid: false}
+	}
+	return sql.NullString{String: trimmed, Valid: true}
 }

@@ -92,10 +92,18 @@ func loginHandler(users store.UserStore) http.HandlerFunc {
 			return
 		}
 
-		if strings.EqualFold(user.Status, "Blocked") {
+		if strings.EqualFold(user.Status, "Block") {
 			writeJSON(w, http.StatusForbidden, errorResponse{
 				Error:   "forbidden",
 				Message: "Your account is blocked. Please contact an administrator.",
+			})
+			return
+		}
+
+		if strings.EqualFold(user.Status, "Waiting") {
+			writeJSON(w, http.StatusForbidden, errorResponse{
+				Error:   "forbidden",
+				Message: "Please wait while admin accept your login.",
 			})
 			return
 		}
