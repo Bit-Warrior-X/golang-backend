@@ -19,3 +19,18 @@ func parseID(path, prefix string) (int64, bool) {
 	}
 	return id, true
 }
+
+func parseIDWithSuffix(path, prefix, suffix string) (int64, bool) {
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return 0, false
+	}
+	raw := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if raw == "" || strings.Contains(raw, "/") {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
+}

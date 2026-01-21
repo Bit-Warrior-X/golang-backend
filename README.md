@@ -54,6 +54,27 @@ CREATE TABLE IF NOT EXISTS users (
   status ENUM('Waiting','Active','Block') NOT NULL,
   created DATETIME NULL
 );
+
+CREATE TABLE IF NOT EXISTS servers (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255),
+  ip VARCHAR(255),
+  status ENUM('Normal','Pause','Expired'),
+  license_type ENUM('Enterprise','Professional','Trial'),
+  license_file VARCHAR(1024),
+  version VARCHAR(50),
+  created DATETIME,
+  expired DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS server_users (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  server_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  UNIQUE KEY unique_membership (server_id, user_id),
+  FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 ```
 
 ## Endpoints

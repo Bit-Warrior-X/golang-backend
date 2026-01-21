@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"vue-project-backend/internal/data"
 	"vue-project-backend/internal/store"
 )
 
@@ -20,6 +19,7 @@ type loginResponse struct {
 }
 
 type userShape struct {
+	ID    int64  `json:"id"`
 	Email string `json:"email"`
 	Role  string `json:"role"`
 	Name  string `json:"name"`
@@ -30,12 +30,13 @@ type errorResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-func registerRoutes(mux *http.ServeMux, users store.UserStore) {
+func registerRoutes(mux *http.ServeMux, users store.UserStore, servers store.ServerStore) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/auth/login", loginHandler(users))
-	mux.HandleFunc("/servers", serversHandler)
+	mux.HandleFunc("/servers", serversHandler(servers))
+	mux.HandleFunc("/servers/", serverUsersHandler(servers))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -110,17 +111,54 @@ func loginHandler(users store.UserStore) http.HandlerFunc {
 
 		writeJSON(w, http.StatusOK, loginResponse{
 			Token: "mock-token",
-			User:  userShape{Email: user.Email, Role: user.Role, Name: user.Name},
+			User:  userShape{ID: user.ID, Email: user.Email, Role: user.Role, Name: user.Name},
 		})
 	}
 }
 
-func serversHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+func serversHandler(servers store.ServerStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		list, err := servers.ListWithUsers(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load servers")
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
 	}
-	writeJSON(w, http.StatusOK, data.ServerList())
+}
+
+type serverUsersPayload struct {
+	UserIDs []int64 `json:"userIds"`
+}
+
+func serverUsersHandler(servers store.ServerStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/users")
+		if !ok {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+
+		switch r.Method {
+		case http.MethodPut:
+			var payload serverUsersPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			if err := servers.UpdateServerUsers(r.Context(), serverID, payload.UserIDs); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to update server users")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	}
 }
 
 func usersHandler(users store.UserStore) http.HandlerFunc {
