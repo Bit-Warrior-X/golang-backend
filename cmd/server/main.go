@@ -11,12 +11,25 @@ import (
 
 	"vue-project-backend/internal/api"
 	"vue-project-backend/internal/config"
+	"vue-project-backend/internal/db"
+	"vue-project-backend/internal/store"
 )
 
 func main() {
 	cfg := config.Load()
 
-	handler := api.NewRouter(cfg)
+	connection, err := db.Open(cfg)
+	if err != nil {
+		log.Fatalf("database connection failed: %v", err)
+	}
+	defer func() {
+		if closeErr := connection.Close(); closeErr != nil {
+			log.Printf("database close failed: %v", closeErr)
+		}
+	}()
+
+	userStore := store.NewUserStore(connection)
+	handler := api.NewRouter(cfg, userStore)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,

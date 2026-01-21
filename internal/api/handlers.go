@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"vue-project-backend/internal/data"
+	"vue-project-backend/internal/store"
 )
 
 type loginRequest struct {
@@ -27,12 +28,14 @@ type errorResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-func registerRoutes(mux *http.ServeMux) {
+func registerRoutes(mux *http.ServeMux, users store.UserStore) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/auth/login", loginHandler)
 	mux.HandleFunc("/servers", serversHandler)
+	mux.HandleFunc("/users", usersHandler(users))
+	mux.HandleFunc("/users/", userHandler(users))
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -93,4 +96,91 @@ func serversHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, data.ServerList())
+}
+
+func usersHandler(users store.UserStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			list, err := users.List(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load users")
+				return
+			}
+			writeJSON(w, http.StatusOK, list)
+		case http.MethodPost:
+			var payload store.UserInput
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			payload = payload.Normalize()
+			if payload.Name == "" || payload.Email == "" {
+				writeError(w, http.StatusBadRequest, "name and email are required")
+				return
+			}
+			created, err := users.Create(r.Context(), payload)
+			if err != nil {
+				if store.IsDuplicateEmail(err) {
+					writeError(w, http.StatusConflict, "email already exists")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to create user")
+				return
+			}
+			writeJSON(w, http.StatusCreated, created)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	}
+}
+
+func userHandler(users store.UserStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := parseID(r.URL.Path, "/users/")
+		if !ok {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+
+		switch r.Method {
+		case http.MethodPut, http.MethodPatch:
+			var payload store.UserInput
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			payload = payload.Normalize()
+			if payload.Name == "" || payload.Email == "" {
+				writeError(w, http.StatusBadRequest, "name and email are required")
+				return
+			}
+			updated, err := users.Update(r.Context(), id, payload)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "user not found")
+					return
+				}
+				if store.IsDuplicateEmail(err) {
+					writeError(w, http.StatusConflict, "email already exists")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to update user")
+				return
+			}
+			writeJSON(w, http.StatusOK, updated)
+		case http.MethodDelete:
+			if err := users.Delete(r.Context(), id); err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "user not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to delete user")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	}
 }
