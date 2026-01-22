@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type Server struct {
@@ -16,6 +18,9 @@ type Server struct {
 	LicenseType string
 	LicenseFile string
 	Version     string
+	SSHUser     string
+	SSHPassword string
+	SSHPort     string
 	Created     sql.NullTime
 	Expired     sql.NullTime
 }
@@ -30,6 +35,9 @@ type ServerView struct {
 	License        string   `json:"license"`
 	LicenseFile    string   `json:"licenseFile"`
 	Version        string   `json:"version"`
+	SSHUser        string   `json:"sshUser"`
+	SSHPassword    string   `json:"sshPassword"`
+	SSHPort        string   `json:"sshPort"`
 	ExpiredDate    string   `json:"expiredDate"`
 	Created        string   `json:"created"`
 	Users          int      `json:"users"`
@@ -37,9 +45,26 @@ type ServerView struct {
 	ManagedUserIds []int64  `json:"managedUserIds"`
 }
 
+type ServerInput struct {
+	Name        string
+	IP          string
+	Status      string
+	LicenseType string
+	LicenseFile string
+	Version     string
+	SSHUser     string
+	SSHPassword string
+	SSHPort     string
+	Expired     *time.Time
+}
+
 type ServerStore interface {
 	ListWithUsers(ctx context.Context) ([]ServerView, error)
 	UpdateServerUsers(ctx context.Context, serverID int64, userIDs []int64) error
+	Create(ctx context.Context, input ServerInput) (Server, error)
+	GetView(ctx context.Context, serverID int64) (ServerView, error)
+	Update(ctx context.Context, serverID int64, input ServerInput) error
+	Delete(ctx context.Context, serverID int64) error
 }
 
 type serverStore struct {
@@ -89,6 +114,9 @@ func (store *serverStore) ListWithUsers(ctx context.Context) ([]ServerView, erro
 			License:        server.LicenseType,
 			LicenseFile:    server.LicenseFile,
 			Version:        server.Version,
+			SSHUser:        server.SSHUser,
+			SSHPassword:    server.SSHPassword,
+			SSHPort:        server.SSHPort,
 			ExpiredDate:    formatDate(server.Expired),
 			Created:        formatDate(server.Created),
 			Users:          len(users),
@@ -98,6 +126,131 @@ func (store *serverStore) ListWithUsers(ctx context.Context) ([]ServerView, erro
 	}
 
 	return views, nil
+}
+
+func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server, error) {
+	now := time.Now()
+	status := strings.TrimSpace(input.Status)
+	if status == "" {
+		status = "Normal"
+	}
+	licenseType := strings.TrimSpace(input.LicenseType)
+	if licenseType == "" {
+		licenseType = "Trial"
+	}
+
+	var expired sql.NullTime
+	if input.Expired != nil {
+		expired = sql.NullTime{Time: *input.Expired, Valid: true}
+	}
+
+	result, err := store.db.ExecContext(ctx, `
+		INSERT INTO servers (name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, created, expired)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		nullableServerString(input.Name),
+		nullableServerString(input.IP),
+		status,
+		licenseType,
+		nullableServerString(input.LicenseFile),
+		nullableServerString(input.Version),
+		nullableServerString(input.SSHUser),
+		nullableServerString(input.SSHPassword),
+		nullableServerInt(input.SSHPort),
+		now,
+		expired,
+	)
+	if err != nil {
+		return Server{}, err
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return Server{}, err
+	}
+
+	return Server{
+		ID:          id,
+		Name:        input.Name,
+		IP:          input.IP,
+		Status:      status,
+		LicenseType: licenseType,
+		LicenseFile: input.LicenseFile,
+		Version:     input.Version,
+		SSHUser:     input.SSHUser,
+		SSHPassword: input.SSHPassword,
+		SSHPort:     input.SSHPort,
+		Created:     sql.NullTime{Time: now, Valid: true},
+		Expired:     expired,
+	}, nil
+}
+
+func (store *serverStore) Update(ctx context.Context, serverID int64, input ServerInput) error {
+	status := strings.TrimSpace(input.Status)
+	licenseType := strings.TrimSpace(input.LicenseType)
+
+	_, err := store.db.ExecContext(ctx, `
+		UPDATE servers
+		SET name = ?, ip = ?, status = ?, license_type = ?, license_file = ?, version = ?, ssh_user = ?, ssh_password = ?, ssh_port = ?
+		WHERE id = ?`,
+		nullableServerString(input.Name),
+		nullableServerString(input.IP),
+		nullableServerString(status),
+		nullableServerString(licenseType),
+		nullableServerString(input.LicenseFile),
+		nullableServerString(input.Version),
+		nullableServerString(input.SSHUser),
+		nullableServerString(input.SSHPassword),
+		nullableServerInt(input.SSHPort),
+		serverID,
+	)
+	return err
+}
+
+func (store *serverStore) Delete(ctx context.Context, serverID int64) error {
+	_, err := store.db.ExecContext(ctx, `DELETE FROM servers WHERE id = ?`, serverID)
+	return err
+}
+
+func (store *serverStore) GetView(ctx context.Context, serverID int64) (ServerView, error) {
+	server, err := store.getServer(ctx, serverID)
+	if err != nil {
+		return ServerView{}, err
+	}
+
+	users, err := store.serverUsersForServer(ctx, serverID)
+	if err != nil {
+		return ServerView{}, err
+	}
+
+	names := make([]string, 0, len(users))
+	ids := make([]int64, 0, len(users))
+	for _, user := range users {
+		names = append(names, user.Name)
+		ids = append(ids, user.ID)
+	}
+	sort.Strings(names)
+
+	statusLabel, statusClass := normalizeStatus(server.Status)
+
+	return ServerView{
+		ID:             server.ID,
+		Name:           server.Name,
+		IP:             server.IP,
+		Status:         server.Status,
+		StatusLabel:    statusLabel,
+		StatusClass:    statusClass,
+		License:        server.LicenseType,
+		LicenseFile:    server.LicenseFile,
+		Version:        server.Version,
+		SSHUser:        server.SSHUser,
+		SSHPassword:    server.SSHPassword,
+		SSHPort:        server.SSHPort,
+		ExpiredDate:    formatDate(server.Expired),
+		Created:        formatDate(server.Created),
+		Users:          len(users),
+		ManagedUsers:   names,
+		ManagedUserIds: ids,
+	}, nil
 }
 
 func (store *serverStore) UpdateServerUsers(ctx context.Context, serverID int64, userIDs []int64) error {
@@ -134,7 +287,7 @@ func (store *serverStore) UpdateServerUsers(ctx context.Context, serverID int64,
 
 func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, name, ip, status, license_type, license_file, version, created, expired
+		SELECT id, name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, created, expired
 		FROM servers
 		ORDER BY id DESC`)
 	if err != nil {
@@ -151,6 +304,9 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 		var licenseType sql.NullString
 		var licenseFile sql.NullString
 		var version sql.NullString
+		var sshUser sql.NullString
+		var sshPassword sql.NullString
+		var sshPort sql.NullInt64
 		if err := rows.Scan(
 			&item.ID,
 			&name,
@@ -159,6 +315,9 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 			&licenseType,
 			&licenseFile,
 			&version,
+			&sshUser,
+			&sshPassword,
+			&sshPort,
 			&item.Created,
 			&item.Expired,
 		); err != nil {
@@ -170,12 +329,60 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 		item.LicenseType = nullStringValue(licenseType)
 		item.LicenseFile = nullStringValue(licenseFile)
 		item.Version = nullStringValue(version)
+		item.SSHUser = nullStringValue(sshUser)
+		item.SSHPassword = nullStringValue(sshPassword)
+		item.SSHPort = nullIntStringValue(sshPort)
 		servers = append(servers, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return servers, nil
+}
+
+func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, created, expired
+		FROM servers
+		WHERE id = ?`, serverID)
+
+	var item Server
+	var name sql.NullString
+	var ip sql.NullString
+	var status sql.NullString
+	var licenseType sql.NullString
+	var licenseFile sql.NullString
+	var version sql.NullString
+	var sshUser sql.NullString
+	var sshPassword sql.NullString
+	var sshPort sql.NullInt64
+	if err := row.Scan(
+		&item.ID,
+		&name,
+		&ip,
+		&status,
+		&licenseType,
+		&licenseFile,
+		&version,
+		&sshUser,
+		&sshPassword,
+		&sshPort,
+		&item.Created,
+		&item.Expired,
+	); err != nil {
+		return Server{}, err
+	}
+
+	item.Name = nullStringValue(name)
+	item.IP = nullStringValue(ip)
+	item.Status = nullStringValue(status)
+	item.LicenseType = nullStringValue(licenseType)
+	item.LicenseFile = nullStringValue(licenseFile)
+	item.Version = nullStringValue(version)
+	item.SSHUser = nullStringValue(sshUser)
+	item.SSHPassword = nullStringValue(sshPassword)
+	item.SSHPort = nullIntStringValue(sshPort)
+	return item, nil
 }
 
 func nullStringValue(value sql.NullString) string {
@@ -213,6 +420,32 @@ func (store *serverStore) serverUsers(ctx context.Context) (map[int64][]userRef,
 	return result, nil
 }
 
+func (store *serverStore) serverUsersForServer(ctx context.Context, serverID int64) ([]userRef, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT u.id, u.name
+		FROM server_users su
+		JOIN users u ON u.id = su.user_id
+		WHERE su.server_id = ? AND u.role = 'User'
+		ORDER BY u.name`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []userRef
+	for rows.Next() {
+		var user userRef
+		if err := rows.Scan(&user.ID, &user.Name); err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
 func formatDate(value sql.NullTime) string {
 	if !value.Valid {
 		return ""
@@ -231,6 +464,33 @@ func normalizeStatus(status string) (string, string) {
 	default:
 		return status, "inactive"
 	}
+}
+
+func nullableServerString(value string) sql.NullString {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return sql.NullString{Valid: false}
+	}
+	return sql.NullString{String: trimmed, Valid: true}
+}
+
+func nullableServerInt(value string) sql.NullInt64 {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return sql.NullInt64{Valid: false}
+	}
+	parsed, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil {
+		return sql.NullInt64{Valid: false}
+	}
+	return sql.NullInt64{Int64: parsed, Valid: true}
+}
+
+func nullIntStringValue(value sql.NullInt64) string {
+	if !value.Valid {
+		return ""
+	}
+	return strconv.FormatInt(value.Int64, 10)
 }
 
 func uniqueInt64(values []int64) []int64 {

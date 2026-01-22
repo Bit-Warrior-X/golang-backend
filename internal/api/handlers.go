@@ -36,7 +36,7 @@ func registerRoutes(mux *http.ServeMux, users store.UserStore, servers store.Ser
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
-	mux.HandleFunc("/servers/", serverUsersHandler(servers))
+	mux.HandleFunc("/servers/", serverDetailHandler(servers))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -118,16 +118,48 @@ func loginHandler(users store.UserStore) http.HandlerFunc {
 
 func serversHandler(servers store.ServerStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			list, err := servers.ListWithUsers(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load servers")
+				return
+			}
+			writeJSON(w, http.StatusOK, list)
+		case http.MethodPost:
+			var payload serverCreatePayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			created, err := servers.Create(r.Context(), store.ServerInput{
+				Name:        strings.TrimSpace(payload.Name),
+				IP:          strings.TrimSpace(payload.IP),
+				Status:      strings.TrimSpace(payload.Status),
+				LicenseType: strings.TrimSpace(payload.LicenseType),
+				LicenseFile: strings.TrimSpace(payload.LicenseFile),
+				Version:     strings.TrimSpace(payload.Version),
+				SSHUser:     strings.TrimSpace(payload.SSHUser),
+				SSHPassword: strings.TrimSpace(payload.SSHPassword),
+				SSHPort:     strings.TrimSpace(payload.SSHPort),
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to create server")
+				return
+			}
+			if err := servers.UpdateServerUsers(r.Context(), created.ID, payload.UserIDs); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to assign server users")
+				return
+			}
+			view, err := servers.GetView(r.Context(), created.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load server")
+				return
+			}
+			writeJSON(w, http.StatusCreated, view)
+		default:
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
 		}
-		list, err := servers.ListWithUsers(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load servers")
-			return
-		}
-		writeJSON(w, http.StatusOK, list)
 	}
 }
 
@@ -135,16 +167,43 @@ type serverUsersPayload struct {
 	UserIDs []int64 `json:"userIds"`
 }
 
-func serverUsersHandler(servers store.ServerStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/users")
-		if !ok {
-			writeError(w, http.StatusNotFound, "not found")
-			return
-		}
+type serverCreatePayload struct {
+	Name        string  `json:"name"`
+	IP          string  `json:"ip"`
+	Status      string  `json:"status"`
+	LicenseType string  `json:"licenseType"`
+	LicenseFile string  `json:"licenseFile"`
+	Version     string  `json:"version"`
+	SSHUser     string  `json:"sshUser"`
+	SSHPassword string  `json:"sshPassword"`
+	SSHPort     string  `json:"sshPort"`
+	UserIDs     []int64 `json:"userIds"`
+}
 
-		switch r.Method {
-		case http.MethodPut:
+type serverUpdatePayload struct {
+	Name        string `json:"name"`
+	IP          string `json:"ip"`
+	Status      string `json:"status"`
+	LicenseType string `json:"licenseType"`
+	LicenseFile string `json:"licenseFile"`
+	Version     string `json:"version"`
+	SSHUser     string `json:"sshUser"`
+	SSHPassword string `json:"sshPassword"`
+	SSHPort     string `json:"sshPort"`
+}
+
+func serverDetailHandler(servers store.ServerStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/users") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/users")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodPut {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
 			var payload serverUsersPayload
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -152,6 +211,47 @@ func serverUsersHandler(servers store.ServerStore) http.HandlerFunc {
 			}
 			if err := servers.UpdateServerUsers(r.Context(), serverID, payload.UserIDs); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to update server users")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		serverID, ok := parseID(r.URL.Path, "/servers/")
+		if !ok {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			var payload serverUpdatePayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			if err := servers.Update(r.Context(), serverID, store.ServerInput{
+				Name:        strings.TrimSpace(payload.Name),
+				IP:          strings.TrimSpace(payload.IP),
+				Status:      strings.TrimSpace(payload.Status),
+				LicenseType: strings.TrimSpace(payload.LicenseType),
+				LicenseFile: strings.TrimSpace(payload.LicenseFile),
+				Version:     strings.TrimSpace(payload.Version),
+				SSHUser:     strings.TrimSpace(payload.SSHUser),
+				SSHPassword: strings.TrimSpace(payload.SSHPassword),
+				SSHPort:     strings.TrimSpace(payload.SSHPort),
+			}); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to update server")
+				return
+			}
+			view, err := servers.GetView(r.Context(), serverID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load server")
+				return
+			}
+			writeJSON(w, http.StatusOK, view)
+		case http.MethodDelete:
+			if err := servers.Delete(r.Context(), serverID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to delete server")
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
