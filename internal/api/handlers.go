@@ -30,13 +30,19 @@ type errorResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-func registerRoutes(mux *http.ServeMux, users store.UserStore, servers store.ServerStore, l4 store.L4Store) {
+func registerRoutes(
+	mux *http.ServeMux,
+	users store.UserStore,
+	servers store.ServerStore,
+	l4 store.L4Store,
+	wafWhitelist store.WafWhitelistStore,
+) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
-	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4))
+	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4, wafWhitelist))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -192,7 +198,22 @@ type serverUpdatePayload struct {
 	SSHPort     string `json:"sshPort"`
 }
 
-func serverDetailHandler(servers store.ServerStore, l4 store.L4Store) http.HandlerFunc {
+type wafWhitelistPayload struct {
+	IPs         string `json:"ips"`
+	URL         string `json:"url"`
+	Method      string `json:"method"`
+	Description string `json:"description"`
+}
+
+type wafWhitelistBatchPayload struct {
+	IDs []int64 `json:"ids"`
+}
+
+func serverDetailHandler(
+	servers store.ServerStore,
+	l4 store.L4Store,
+	wafWhitelist store.WafWhitelistStore,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/users") {
 			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/users")
@@ -261,6 +282,100 @@ func serverDetailHandler(servers store.ServerStore, l4 store.L4Store) http.Handl
 			return
 		}
 
+		if strings.Contains(r.URL.Path, "/waf/whitelist") {
+			serverID, ruleID, isBatch, ok := parseWafWhitelistPath(r.URL.Path)
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+
+			switch r.Method {
+			case http.MethodGet:
+				if ruleID != 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := wafWhitelist.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load whitelist rules")
+					return
+				}
+				writeJSON(w, http.StatusOK, list)
+			case http.MethodPost:
+				if isBatch {
+					var payload wafWhitelistBatchPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						writeError(w, http.StatusBadRequest, "invalid JSON body")
+						return
+					}
+					if err := wafWhitelist.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to delete rules")
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				var payload wafWhitelistPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				created, err := wafWhitelist.Create(r.Context(), serverID, store.WafWhitelistInput{
+					IPs:         strings.TrimSpace(payload.IPs),
+					URL:         strings.TrimSpace(payload.URL),
+					Method:      strings.TrimSpace(payload.Method),
+					Description: strings.TrimSpace(payload.Description),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to create whitelist rule")
+					return
+				}
+				writeJSON(w, http.StatusCreated, created)
+			case http.MethodPut:
+				if ruleID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				var payload wafWhitelistPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				updated, err := wafWhitelist.Update(r.Context(), serverID, ruleID, store.WafWhitelistInput{
+					IPs:         strings.TrimSpace(payload.IPs),
+					URL:         strings.TrimSpace(payload.URL),
+					Method:      strings.TrimSpace(payload.Method),
+					Description: strings.TrimSpace(payload.Description),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "whitelist rule not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to update whitelist rule")
+					return
+				}
+				writeJSON(w, http.StatusOK, updated)
+			case http.MethodDelete:
+				if ruleID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				if err := wafWhitelist.Delete(r.Context(), serverID, ruleID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete whitelist rule")
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
 		serverID, ok := parseID(r.URL.Path, "/servers/")
 		if !ok {
 			writeError(w, http.StatusNotFound, "not found")
@@ -303,6 +418,35 @@ func serverDetailHandler(servers store.ServerStore, l4 store.L4Store) http.Handl
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
 	}
+}
+
+func parseWafWhitelistPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/servers/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 3 {
+		return 0, 0, false, false
+	}
+	if parts[1] != "waf" || parts[2] != "whitelist" {
+		return 0, 0, false, false
+	}
+	serverID, ok = parsePositiveInt(parts[0])
+	if !ok {
+		return 0, 0, false, false
+	}
+	if len(parts) == 3 {
+		return serverID, 0, false, true
+	}
+	if len(parts) == 4 && parts[3] == "batch-delete" {
+		return serverID, 0, true, true
+	}
+	if len(parts) == 4 {
+		ruleID, ok = parsePositiveInt(parts[3])
+		if !ok {
+			return 0, 0, false, false
+		}
+		return serverID, ruleID, false, true
+	}
+	return 0, 0, false, false
 }
 
 func usersHandler(users store.UserStore) http.HandlerFunc {

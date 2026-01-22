@@ -31,7 +31,8 @@ func main() {
 	userStore := store.NewUserStore(connection)
 	serverStore := store.NewServerStore(connection)
 	l4Store := store.NewL4Store(connection)
-	handler := api.NewRouter(cfg, userStore, serverStore, l4Store)
+	wafWhitelistStore := store.NewWafWhitelistStore(connection)
+	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, wafWhitelistStore)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,

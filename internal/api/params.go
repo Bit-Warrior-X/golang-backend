@@ -34,3 +34,11 @@ func parseIDWithSuffix(path, prefix, suffix string) (int64, bool) {
 	}
 	return id, true
 }
+
+func parsePositiveInt(value string) (int64, bool) {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0, false
+	}
+	return parsed, true
+}
