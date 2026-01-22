@@ -30,7 +30,8 @@ func main() {
 
 	userStore := store.NewUserStore(connection)
 	serverStore := store.NewServerStore(connection)
-	handler := api.NewRouter(cfg, userStore, serverStore)
+	l4Store := store.NewL4Store(connection)
+	handler := api.NewRouter(cfg, userStore, serverStore, l4Store)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,

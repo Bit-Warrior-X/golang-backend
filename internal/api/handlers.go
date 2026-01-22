@@ -30,13 +30,13 @@ type errorResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-func registerRoutes(mux *http.ServeMux, users store.UserStore, servers store.ServerStore) {
+func registerRoutes(mux *http.ServeMux, users store.UserStore, servers store.ServerStore, l4 store.L4Store) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
-	mux.HandleFunc("/servers/", serverDetailHandler(servers))
+	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -192,7 +192,7 @@ type serverUpdatePayload struct {
 	SSHPort     string `json:"sshPort"`
 }
 
-func serverDetailHandler(servers store.ServerStore) http.HandlerFunc {
+func serverDetailHandler(servers store.ServerStore, l4 store.L4Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/users") {
 			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/users")
@@ -214,6 +214,50 @@ func serverDetailHandler(servers store.ServerStore) http.HandlerFunc {
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		if strings.HasSuffix(r.URL.Path, "/l4") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/l4")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			switch r.Method {
+			case http.MethodGet:
+				config, err := l4.GetByServerID(r.Context(), serverID)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "l4 config not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to load l4 config")
+					return
+				}
+				writeJSON(w, http.StatusOK, config)
+			case http.MethodPut:
+				var payload store.L4Config
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				if err := l4.UpdateByServerID(r.Context(), serverID, payload); err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "l4 config not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to update l4 config")
+					return
+				}
+				updated, err := l4.GetByServerID(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load l4 config")
+					return
+				}
+				writeJSON(w, http.StatusOK, updated)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
 			return
 		}
 
