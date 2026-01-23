@@ -21,10 +21,11 @@ func NewRouter(
 	wafSecond store.WafSecondStore,
 	wafResponse store.WafResponseStore,
 	wafUserAgent store.WafUserAgentStore,
+	upstreamServers store.UpstreamServerStore,
 ) http.Handler {
 	mux := http.NewServeMux()
 
-	registerRoutes(mux, users, servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent)
+	registerRoutes(mux, users, servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers)
 
 	handler := withCORS(cfg, mux)
 	handler = withRequestLogging(handler)

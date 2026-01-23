@@ -44,13 +44,14 @@ func registerRoutes(
 	wafSecond store.WafSecondStore,
 	wafResponse store.WafResponseStore,
 	wafUserAgent store.WafUserAgentStore,
+	upstreamServers store.UpstreamServerStore,
 ) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
-	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent))
+	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -317,6 +318,16 @@ type wafUserAgentBatchPayload struct {
 	IDs []int64 `json:"ids"`
 }
 
+type upstreamServerPayload struct {
+	Address     string `json:"address"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+}
+
+type upstreamServerBatchPayload struct {
+	IDs []int64 `json:"ids"`
+}
+
 func serverDetailHandler(
 	servers store.ServerStore,
 	l4 store.L4Store,
@@ -329,6 +340,7 @@ func serverDetailHandler(
 	wafSecond store.WafSecondStore,
 	wafResponse store.WafResponseStore,
 	wafUserAgent store.WafUserAgentStore,
+	upstreamServers store.UpstreamServerStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/users") {
@@ -1268,6 +1280,98 @@ func serverDetailHandler(
 			return
 		}
 
+		if strings.Contains(r.URL.Path, "/upstream-servers") {
+			serverID, upstreamID, isBatch, ok := parseUpstreamPath(r.URL.Path)
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+
+			switch r.Method {
+			case http.MethodGet:
+				if upstreamID != 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := upstreamServers.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
+					return
+				}
+				writeJSON(w, http.StatusOK, list)
+			case http.MethodPost:
+				if isBatch {
+					var payload upstreamServerBatchPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						writeError(w, http.StatusBadRequest, "invalid JSON body")
+						return
+					}
+					if err := upstreamServers.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to delete upstream servers")
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				var payload upstreamServerPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				created, err := upstreamServers.Create(r.Context(), serverID, store.UpstreamServerInput{
+					Address:     strings.TrimSpace(payload.Address),
+					Description: strings.TrimSpace(payload.Description),
+					Status:      strings.TrimSpace(payload.Status),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to create upstream server")
+					return
+				}
+				writeJSON(w, http.StatusCreated, created)
+			case http.MethodPut:
+				if upstreamID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				var payload upstreamServerPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				updated, err := upstreamServers.Update(r.Context(), serverID, upstreamID, store.UpstreamServerInput{
+					Address:     strings.TrimSpace(payload.Address),
+					Description: strings.TrimSpace(payload.Description),
+					Status:      strings.TrimSpace(payload.Status),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "upstream server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to update upstream server")
+					return
+				}
+				writeJSON(w, http.StatusOK, updated)
+			case http.MethodDelete:
+				if upstreamID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				if err := upstreamServers.Delete(r.Context(), serverID, upstreamID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete upstream server")
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
 		serverID, ok := parseID(r.URL.Path, "/servers/")
 		if !ok {
 			writeError(w, http.StatusNotFound, "not found")
@@ -1569,6 +1673,35 @@ func parseWafUserAgentPath(path string) (serverID int64, ruleID int64, isBatch b
 			return 0, 0, false, false
 		}
 		return serverID, ruleID, false, true
+	}
+	return 0, 0, false, false
+}
+
+func parseUpstreamPath(path string) (serverID int64, upstreamID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/servers/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 2 {
+		return 0, 0, false, false
+	}
+	if parts[1] != "upstream-servers" {
+		return 0, 0, false, false
+	}
+	serverID, ok = parsePositiveInt(parts[0])
+	if !ok {
+		return 0, 0, false, false
+	}
+	if len(parts) == 2 {
+		return serverID, 0, false, true
+	}
+	if len(parts) == 3 && parts[2] == "batch-delete" {
+		return serverID, 0, true, true
+	}
+	if len(parts) == 3 {
+		upstreamID, ok = parsePositiveInt(parts[2])
+		if !ok {
+			return 0, 0, false, false
+		}
+		return serverID, upstreamID, false, true
 	}
 	return 0, 0, false, false
 }
