@@ -36,7 +36,8 @@ func main() {
 	wafGeoStore := store.NewWafGeoStore(connection)
 	wafAntiCcStore := store.NewWafAntiCcStore(connection)
 	wafAntiHeaderStore := store.NewWafAntiHeaderStore(connection)
-	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore)
+	wafIntervalStore := store.NewWafIntervalStore(connection)
+	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,

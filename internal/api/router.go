@@ -17,10 +17,11 @@ func NewRouter(
 	wafGeo store.WafGeoStore,
 	wafAntiCc store.WafAntiCcStore,
 	wafAntiHeader store.WafAntiHeaderStore,
+	wafInterval store.WafIntervalStore,
 ) http.Handler {
 	mux := http.NewServeMux()
 
-	registerRoutes(mux, users, servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader)
+	registerRoutes(mux, users, servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval)
 
 	handler := withCORS(cfg, mux)
 	handler = withRequestLogging(handler)
