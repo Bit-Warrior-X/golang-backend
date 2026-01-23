@@ -41,13 +41,14 @@ func registerRoutes(
 	wafAntiCc store.WafAntiCcStore,
 	wafAntiHeader store.WafAntiHeaderStore,
 	wafInterval store.WafIntervalStore,
+	wafSecond store.WafSecondStore,
 ) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
-	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval))
+	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -277,6 +278,18 @@ type wafIntervalBatchPayload struct {
 	IDs []int64 `json:"ids"`
 }
 
+type wafSecondPayload struct {
+	URL          string `json:"url"`
+	RequestCount int    `json:"requestCount"`
+	Burst        int    `json:"burst"`
+	Behavior     string `json:"behavior"`
+	Status       string `json:"status"`
+}
+
+type wafSecondBatchPayload struct {
+	IDs []int64 `json:"ids"`
+}
+
 func serverDetailHandler(
 	servers store.ServerStore,
 	l4 store.L4Store,
@@ -286,6 +299,7 @@ func serverDetailHandler(
 	wafAntiCc store.WafAntiCcStore,
 	wafAntiHeader store.WafAntiHeaderStore,
 	wafInterval store.WafIntervalStore,
+	wafSecond store.WafSecondStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/users") {
@@ -935,6 +949,102 @@ func serverDetailHandler(
 			return
 		}
 
+		if strings.Contains(r.URL.Path, "/waf/second-freq-limit") {
+			serverID, ruleID, isBatch, ok := parseWafSecondPath(r.URL.Path)
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+
+			switch r.Method {
+			case http.MethodGet:
+				if ruleID != 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := wafSecond.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load second freq rules")
+					return
+				}
+				writeJSON(w, http.StatusOK, list)
+			case http.MethodPost:
+				if isBatch {
+					var payload wafSecondBatchPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						writeError(w, http.StatusBadRequest, "invalid JSON body")
+						return
+					}
+					if err := wafSecond.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to delete rules")
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				var payload wafSecondPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				created, err := wafSecond.Create(r.Context(), serverID, store.WafSecondInput{
+					URL:          strings.TrimSpace(payload.URL),
+					RequestCount: payload.RequestCount,
+					Burst:        payload.Burst,
+					Behavior:     strings.TrimSpace(payload.Behavior),
+					Status:       strings.TrimSpace(payload.Status),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to create second freq rule")
+					return
+				}
+				writeJSON(w, http.StatusCreated, created)
+			case http.MethodPut:
+				if ruleID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				var payload wafSecondPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				updated, err := wafSecond.Update(r.Context(), serverID, ruleID, store.WafSecondInput{
+					URL:          strings.TrimSpace(payload.URL),
+					RequestCount: payload.RequestCount,
+					Burst:        payload.Burst,
+					Behavior:     strings.TrimSpace(payload.Behavior),
+					Status:       strings.TrimSpace(payload.Status),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "second freq rule not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to update second freq rule")
+					return
+				}
+				writeJSON(w, http.StatusOK, updated)
+			case http.MethodDelete:
+				if ruleID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				if err := wafSecond.Delete(r.Context(), serverID, ruleID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete second freq rule")
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
 		serverID, ok := parseID(r.URL.Path, "/servers/")
 		if !ok {
 			writeError(w, http.StatusNotFound, "not found")
@@ -1131,6 +1241,35 @@ func parseWafIntervalPath(path string) (serverID int64, ruleID int64, isBatch bo
 		return 0, 0, false, false
 	}
 	if parts[1] != "waf" || parts[2] != "interval-freq-limit" {
+		return 0, 0, false, false
+	}
+	serverID, ok = parsePositiveInt(parts[0])
+	if !ok {
+		return 0, 0, false, false
+	}
+	if len(parts) == 3 {
+		return serverID, 0, false, true
+	}
+	if len(parts) == 4 && parts[3] == "batch-delete" {
+		return serverID, 0, true, true
+	}
+	if len(parts) == 4 {
+		ruleID, ok = parsePositiveInt(parts[3])
+		if !ok {
+			return 0, 0, false, false
+		}
+		return serverID, ruleID, false, true
+	}
+	return 0, 0, false, false
+}
+
+func parseWafSecondPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/servers/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 3 {
+		return 0, 0, false, false
+	}
+	if parts[1] != "waf" || parts[2] != "second-freq-limit" {
 		return 0, 0, false, false
 	}
 	serverID, ok = parsePositiveInt(parts[0])
