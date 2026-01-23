@@ -39,13 +39,14 @@ func registerRoutes(
 	wafBlacklist store.WafBlacklistStore,
 	wafGeo store.WafGeoStore,
 	wafAntiCc store.WafAntiCcStore,
+	wafAntiHeader store.WafAntiHeaderStore,
 ) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
-	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc))
+	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -250,6 +251,19 @@ type wafAntiCcBatchPayload struct {
 	IDs []int64 `json:"ids"`
 }
 
+type wafAntiHeaderPayload struct {
+	URL       string `json:"url"`
+	Header    string `json:"header"`
+	Value     string `json:"value"`
+	BlockMode string `json:"blockMode"`
+	Behavior  string `json:"behavior"`
+	Status    string `json:"status"`
+}
+
+type wafAntiHeaderBatchPayload struct {
+	IDs []int64 `json:"ids"`
+}
+
 func serverDetailHandler(
 	servers store.ServerStore,
 	l4 store.L4Store,
@@ -257,6 +271,7 @@ func serverDetailHandler(
 	wafBlacklist store.WafBlacklistStore,
 	wafGeo store.WafGeoStore,
 	wafAntiCc store.WafAntiCcStore,
+	wafAntiHeader store.WafAntiHeaderStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/users") {
@@ -712,6 +727,104 @@ func serverDetailHandler(
 			return
 		}
 
+		if strings.Contains(r.URL.Path, "/waf/anti-header") {
+			serverID, ruleID, isBatch, ok := parseWafAntiHeaderPath(r.URL.Path)
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+
+			switch r.Method {
+			case http.MethodGet:
+				if ruleID != 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := wafAntiHeader.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load anti-header rules")
+					return
+				}
+				writeJSON(w, http.StatusOK, list)
+			case http.MethodPost:
+				if isBatch {
+					var payload wafAntiHeaderBatchPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						writeError(w, http.StatusBadRequest, "invalid JSON body")
+						return
+					}
+					if err := wafAntiHeader.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to delete rules")
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				var payload wafAntiHeaderPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				created, err := wafAntiHeader.Create(r.Context(), serverID, store.WafAntiHeaderInput{
+					URL:       strings.TrimSpace(payload.URL),
+					Header:    strings.TrimSpace(payload.Header),
+					Value:     strings.TrimSpace(payload.Value),
+					BlockMode: strings.TrimSpace(payload.BlockMode),
+					Behavior:  strings.TrimSpace(payload.Behavior),
+					Status:    strings.TrimSpace(payload.Status),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to create anti-header rule")
+					return
+				}
+				writeJSON(w, http.StatusCreated, created)
+			case http.MethodPut:
+				if ruleID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				var payload wafAntiHeaderPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				updated, err := wafAntiHeader.Update(r.Context(), serverID, ruleID, store.WafAntiHeaderInput{
+					URL:       strings.TrimSpace(payload.URL),
+					Header:    strings.TrimSpace(payload.Header),
+					Value:     strings.TrimSpace(payload.Value),
+					BlockMode: strings.TrimSpace(payload.BlockMode),
+					Behavior:  strings.TrimSpace(payload.Behavior),
+					Status:    strings.TrimSpace(payload.Status),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "anti-header rule not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to update anti-header rule")
+					return
+				}
+				writeJSON(w, http.StatusOK, updated)
+			case http.MethodDelete:
+				if ruleID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				if err := wafAntiHeader.Delete(r.Context(), serverID, ruleID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete anti-header rule")
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
 		serverID, ok := parseID(r.URL.Path, "/servers/")
 		if !ok {
 			writeError(w, http.StatusNotFound, "not found")
@@ -850,6 +963,35 @@ func parseWafAntiCcPath(path string) (serverID int64, ruleID int64, isBatch bool
 		return 0, 0, false, false
 	}
 	if parts[1] != "waf" || parts[2] != "anti-cc" {
+		return 0, 0, false, false
+	}
+	serverID, ok = parsePositiveInt(parts[0])
+	if !ok {
+		return 0, 0, false, false
+	}
+	if len(parts) == 3 {
+		return serverID, 0, false, true
+	}
+	if len(parts) == 4 && parts[3] == "batch-delete" {
+		return serverID, 0, true, true
+	}
+	if len(parts) == 4 {
+		ruleID, ok = parsePositiveInt(parts[3])
+		if !ok {
+			return 0, 0, false, false
+		}
+		return serverID, ruleID, false, true
+	}
+	return 0, 0, false, false
+}
+
+func parseWafAntiHeaderPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/servers/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 3 {
+		return 0, 0, false, false
+	}
+	if parts[1] != "waf" || parts[2] != "anti-header" {
 		return 0, 0, false, false
 	}
 	serverID, ok = parsePositiveInt(parts[0])
