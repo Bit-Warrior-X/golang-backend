@@ -470,6 +470,16 @@ func serverDetailHandler(
 	upstreamServers store.UpstreamServerStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/access-log/stream") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/access-log/stream")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			streamAccessLog(w, r, servers, serverID)
+			return
+		}
+
 		if strings.HasSuffix(r.URL.Path, "/users") {
 			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/users")
 			if !ok {
