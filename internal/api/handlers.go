@@ -45,12 +45,15 @@ func registerRoutes(
 	wafResponse store.WafResponseStore,
 	wafUserAgent store.WafUserAgentStore,
 	upstreamServers store.UpstreamServerStore,
+	blacklist store.BlacklistStore,
 ) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
+	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
+	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(blacklist))
 	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
@@ -326,6 +329,130 @@ type upstreamServerPayload struct {
 
 type upstreamServerBatchPayload struct {
 	IDs []int64 `json:"ids"`
+}
+
+type serverBlacklistPayload struct {
+	ServerID    int64  `json:"serverId"`
+	IPAddress   string `json:"ipAddress"`
+	Geolocation string `json:"geolocation"`
+	Reason      string `json:"reason"`
+	Server      string `json:"server"`
+	TTL         string `json:"ttl"`
+	TriggerRule string `json:"triggerRule"`
+}
+
+func serverBlacklistHandler(blacklist store.BlacklistStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/servers/blacklist")
+		if path == "" || path == "/" {
+			switch r.Method {
+			case http.MethodGet:
+				var serverID int64
+				rawServerID := strings.TrimSpace(r.URL.Query().Get("serverId"))
+				if rawServerID != "" {
+					parsed, ok := parsePositiveInt(rawServerID)
+					if !ok {
+						writeError(w, http.StatusBadRequest, "invalid serverId")
+						return
+					}
+					serverID = parsed
+				}
+				list, err := blacklist.List(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load blacklist entries")
+					return
+				}
+				writeJSON(w, http.StatusOK, list)
+			case http.MethodPost:
+				var payload serverBlacklistPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				if payload.ServerID == 0 {
+					writeError(w, http.StatusBadRequest, "serverId is required")
+					return
+				}
+				ipAddress := strings.TrimSpace(payload.IPAddress)
+				if ipAddress == "" {
+					writeError(w, http.StatusBadRequest, "ipAddress is required")
+					return
+				}
+				geolocation := strings.TrimSpace(payload.Geolocation)
+				if geolocation == "" {
+					geolocation = "Manual"
+				}
+				reason := strings.TrimSpace(payload.Reason)
+				if reason == "" {
+					reason = "Manual block"
+				}
+				ttl := strings.TrimSpace(payload.TTL)
+				triggerRule := strings.TrimSpace(payload.TriggerRule)
+				serverName := strings.TrimSpace(payload.Server)
+
+				created, err := blacklist.Create(r.Context(), payload.ServerID, store.BlacklistInput{
+					IPAddress:   ipAddress,
+					Geolocation: geolocation,
+					Reason:      reason,
+					Server:      serverName,
+					TTL:         ttl,
+					TriggerRule: triggerRule,
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to create blacklist entry")
+					return
+				}
+				writeJSON(w, http.StatusCreated, created)
+			case http.MethodDelete:
+				var serverID int64
+				rawServerID := strings.TrimSpace(r.URL.Query().Get("serverId"))
+				if rawServerID != "" {
+					parsed, ok := parsePositiveInt(rawServerID)
+					if !ok {
+						writeError(w, http.StatusBadRequest, "invalid serverId")
+						return
+					}
+					serverID = parsed
+				}
+				if err := blacklist.DeleteAll(r.Context(), serverID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to flush blacklist entries")
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
+		if !strings.HasPrefix(path, "/") {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		rawID := strings.TrimPrefix(path, "/")
+		if rawID == "" || strings.Contains(rawID, "/") {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		entryID, ok := parsePositiveInt(rawID)
+		if !ok {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		if r.Method != http.MethodDelete {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if err := blacklist.Delete(r.Context(), entryID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to delete blacklist entry")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 func serverDetailHandler(
