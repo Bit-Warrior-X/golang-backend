@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -20,6 +21,12 @@ const (
 	defaultAccessLogPath  = "/var/log/nginx/access.log"
 	defaultAccessLogLines = 200
 	maxAccessLogLines     = 2000
+	accessLogStreamMaxDur = 30 * time.Minute
+)
+
+var (
+	accessLogStreamMu     sync.Mutex
+	accessLogStreamActive = make(map[int64]int)
 )
 
 type accessLogMessage struct {
@@ -43,6 +50,25 @@ func streamAccessLog(w http.ResponseWriter, r *http.Request, servers store.Serve
 		return
 	}
 	defer conn.Close()
+
+	accessLogStreamMu.Lock()
+	if accessLogStreamActive[serverID] > 0 {
+		accessLogStreamMu.Unlock()
+		_ = conn.WriteJSON(errorResponse{Error: "busy", Message: "access log stream already active for this server"})
+		return
+	}
+	accessLogStreamActive[serverID]++
+	accessLogStreamMu.Unlock()
+	defer func() {
+		accessLogStreamMu.Lock()
+		if accessLogStreamActive[serverID] > 0 {
+			accessLogStreamActive[serverID]--
+		}
+		if accessLogStreamActive[serverID] == 0 {
+			delete(accessLogStreamActive, serverID)
+		}
+		accessLogStreamMu.Unlock()
+	}()
 
 	view, err := servers.GetView(r.Context(), serverID)
 	if err != nil {
@@ -103,8 +129,20 @@ func streamAccessLog(w http.ResponseWriter, r *http.Request, servers store.Serve
 		return
 	}
 
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), accessLogStreamMaxDur)
 	defer cancel()
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = session.Signal(ssh.SIGTERM)
+			_ = session.Close()
+			_ = client.Close()
+		case <-done:
+		}
+	}()
 
 	go func() {
 		for {
