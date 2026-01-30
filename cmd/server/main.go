@@ -31,6 +31,8 @@ func main() {
 	userStore := store.NewUserStore(connection)
 	serverStore := store.NewServerStore(connection)
 	l4Store := store.NewL4Store(connection)
+	l4LiveAttackStore := store.NewL4LiveAttackStore(connection)
+	securityEventStore := store.NewSecurityEventStore(connection)
 	wafWhitelistStore := store.NewWafWhitelistStore(connection)
 	wafBlacklistStore := store.NewWafBlacklistStore(connection)
 	wafGeoStore := store.NewWafGeoStore(connection)
@@ -42,7 +44,7 @@ func main() {
 	wafUserAgentStore := store.NewWafUserAgentStore(connection)
 	upstreamStore := store.NewUpstreamServerStore(connection)
 	blacklistStore := store.NewBlacklistStore(connection)
-	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, blacklistStore)
+	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, l4LiveAttackStore, securityEventStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, blacklistStore)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,

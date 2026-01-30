@@ -60,6 +60,8 @@ type ServerInput struct {
 
 type ServerStore interface {
 	ListWithUsers(ctx context.Context) ([]ServerView, error)
+	Count(ctx context.Context) (int64, error)
+	CountByStatus(ctx context.Context, status string) (int64, error)
 	UpdateServerUsers(ctx context.Context, serverID int64, userIDs []int64) error
 	Create(ctx context.Context, input ServerInput) (Server, error)
 	GetView(ctx context.Context, serverID int64) (ServerView, error)
@@ -126,6 +128,24 @@ func (store *serverStore) ListWithUsers(ctx context.Context) ([]ServerView, erro
 	}
 
 	return views, nil
+}
+
+func (store *serverStore) Count(ctx context.Context) (int64, error) {
+	var total int64
+	row := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM servers`)
+	if err := row.Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func (store *serverStore) CountByStatus(ctx context.Context, status string) (int64, error) {
+	var total int64
+	row := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM servers WHERE status = ?`, strings.TrimSpace(status))
+	if err := row.Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server, error) {

@@ -43,6 +43,7 @@ func (input UserInput) Normalize() UserInput {
 
 type UserStore interface {
 	List(ctx context.Context) ([]User, error)
+	Count(ctx context.Context) (int64, error)
 	FindByCredentials(ctx context.Context, email, password string) (User, error)
 	Create(ctx context.Context, input UserInput) (User, error)
 	Update(ctx context.Context, id int64, input UserInput) (User, error)
@@ -97,6 +98,15 @@ func (store *userStore) List(ctx context.Context) ([]User, error) {
 	}
 
 	return users, nil
+}
+
+func (store *userStore) Count(ctx context.Context) (int64, error) {
+	var total int64
+	row := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`)
+	if err := row.Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 func (store *userStore) FindByCredentials(ctx context.Context, email, password string) (User, error) {

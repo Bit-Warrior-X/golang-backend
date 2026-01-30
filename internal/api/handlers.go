@@ -3,7 +3,9 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"vue-project-backend/internal/store"
 )
@@ -35,6 +37,8 @@ func registerRoutes(
 	users store.UserStore,
 	servers store.ServerStore,
 	l4 store.L4Store,
+	l4LiveAttack store.L4LiveAttackStore,
+	securityEvents store.SecurityEventStore,
 	wafWhitelist store.WafWhitelistStore,
 	wafBlacklist store.WafBlacklistStore,
 	wafGeo store.WafGeoStore,
@@ -50,6 +54,10 @@ func registerRoutes(
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
+	mux.HandleFunc("/dashboard/summary", dashboardSummaryHandler(users, servers, blacklist, l4LiveAttack))
+	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, blacklist, l4LiveAttack))
+	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
+	mux.HandleFunc("/api/v1/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
@@ -76,6 +84,98 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"version": "v1",
 	})
+}
+
+type dashboardSummaryResponse struct {
+	TotalUsers   int64 `json:"totalUsers"`
+	TotalServers int64 `json:"totalServers"`
+	ActiveServers int64 `json:"activeServers"`
+	BlockedIps   int64 `json:"blockedIps"`
+	L4AttacksThisMonth int64 `json:"l4AttacksThisMonth"`
+	L4AttacksPreviousMonth int64 `json:"l4AttacksPreviousMonth"`
+}
+
+func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, blacklist store.BlacklistStore, l4LiveAttack store.L4LiveAttackStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		totalUsers, err := users.Count(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load users total")
+			return
+		}
+
+		totalServers, err := servers.Count(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load servers total")
+			return
+		}
+
+		activeServers, err := servers.CountByStatus(r.Context(), "Normal")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load active servers")
+			return
+		}
+
+		blockedIps, err := blacklist.Count(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load blocked ips")
+			return
+		}
+
+		now := time.Now()
+		startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		startOfNextMonth := startOfMonth.AddDate(0, 1, 0)
+		startOfPreviousMonth := startOfMonth.AddDate(0, -1, 0)
+
+		l4ThisMonth, err := l4LiveAttack.CountBetween(r.Context(), startOfMonth, startOfNextMonth)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load l4 attacks this month")
+			return
+		}
+
+		l4PreviousMonth, err := l4LiveAttack.CountBetween(r.Context(), startOfPreviousMonth, startOfMonth)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load l4 attacks previous month")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, dashboardSummaryResponse{
+			TotalUsers:   totalUsers,
+			TotalServers: totalServers,
+			ActiveServers: activeServers,
+			BlockedIps:   blockedIps,
+			L4AttacksThisMonth: l4ThisMonth,
+			L4AttacksPreviousMonth: l4PreviousMonth,
+		})
+	}
+}
+
+func dashboardSecurityEventsHandler(securityEvents store.SecurityEventStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		limit := 5
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+
+		events, err := securityEvents.ListRecent(r.Context(), limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load security events")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, events)
+	}
 }
 
 func loginHandler(users store.UserStore) http.HandlerFunc {

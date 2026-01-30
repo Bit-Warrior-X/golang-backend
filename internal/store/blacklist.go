@@ -32,6 +32,7 @@ type BlacklistInput struct {
 
 type BlacklistStore interface {
 	List(ctx context.Context, serverID int64) ([]BlacklistEntry, error)
+	Count(ctx context.Context) (int64, error)
 	Create(ctx context.Context, serverID int64, input BlacklistInput) (BlacklistEntry, error)
 	Delete(ctx context.Context, entryID int64) error
 	DeleteAll(ctx context.Context, serverID int64) error
@@ -113,6 +114,15 @@ func (store *blacklistStore) List(ctx context.Context, serverID int64) ([]Blackl
 		return nil, err
 	}
 	return entries, nil
+}
+
+func (store *blacklistStore) Count(ctx context.Context) (int64, error) {
+	var total int64
+	row := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM blacklist`)
+	if err := row.Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 func (store *blacklistStore) Create(ctx context.Context, serverID int64, input BlacklistInput) (BlacklistEntry, error) {
