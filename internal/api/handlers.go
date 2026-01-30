@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
@@ -66,6 +67,36 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/dashboard/request-response", dashboardRequestResponseHandler(serverTrafficStats))
 	mux.HandleFunc("/dashboard/status-codes", dashboardStatusCodesHandler(serverTrafficStats))
 	mux.HandleFunc("/api/v1/dashboard/status-codes", dashboardStatusCodesHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/summary", analyticsSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/summary", analyticsSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/series/bandwidth", analyticsBandwidthSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/series/bandwidth", analyticsBandwidthSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/series/traffic", analyticsTrafficSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/series/traffic", analyticsTrafficSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/series/request-response", analyticsRequestResponseSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/series/request-response", analyticsRequestResponseSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/series/status-codes", analyticsStatusCodesSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/series/status-codes", analyticsStatusCodesSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/series/ip-count", analyticsIpCountSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/series/ip-count", analyticsIpCountSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/series/methods", analyticsMethodSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/series/methods", analyticsMethodSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/series/protocols", analyticsProtocolSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/series/protocols", analyticsProtocolSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/summary/status-codes", analyticsStatusCodesSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/summary/status-codes", analyticsStatusCodesSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/summary/methods", analyticsMethodSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/summary/methods", analyticsMethodSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/summary/protocols", analyticsProtocolSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/summary/protocols", analyticsProtocolSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/summary/top-ips", analyticsTopIpsSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/summary/top-ips", analyticsTopIpsSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/summary/isps", analyticsIspSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/summary/isps", analyticsIspSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/summary/referers", analyticsRefererSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/summary/referers", analyticsRefererSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/summary/countries", analyticsCountrySummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/summary/countries", analyticsCountrySummaryHandler(serverTrafficStats))
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
@@ -370,6 +401,534 @@ func parseServerIDParam(value string) (int64, error) {
 		return 0, err
 	}
 	return parsed, nil
+}
+
+type analyticsSummaryResponse struct {
+	TotalTraffic     int64  `json:"totalTraffic"`
+	BandwidthLast    int64  `json:"bandwidthLast"`
+	BandwidthLastTime string `json:"bandwidthLastTime"`
+	TotalRequest     int64  `json:"totalRequest"`
+	TotalResponse    int64  `json:"totalResponse"`
+	IpCount          int64  `json:"ipCount"`
+	RefererCount     int64  `json:"refererCount"`
+	IspCount         int64  `json:"ispCount"`
+}
+
+func analyticsSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		totalTraffic, totalRequest, totalResponse, totalIp, err := stats.SumTotals(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load analytics summary")
+			return
+		}
+
+		bandwidthLast, bandwidthTime, err := stats.LatestBandwidth(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load bandwidth")
+			return
+		}
+
+		refererCount, err := stats.SumRefererRequests(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load referer count")
+			return
+		}
+
+		ispCount, err := stats.SumIspRequests(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load isp count")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, analyticsSummaryResponse{
+			TotalTraffic:     totalTraffic,
+			BandwidthLast:    bandwidthLast,
+			BandwidthLastTime: bandwidthTime.Format(time.RFC3339),
+			TotalRequest:     totalRequest,
+			TotalResponse:    totalResponse,
+			IpCount:          totalIp,
+			RefererCount:     refererCount,
+			IspCount:         ispCount,
+		})
+	}
+}
+
+func analyticsBandwidthSeriesHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		points, err := stats.ListBandwidthAggregate(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load bandwidth series")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func analyticsTrafficSeriesHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		points, err := stats.ListTraffic(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load traffic series")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func analyticsRequestResponseSeriesHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		points, err := stats.ListRequestResponse(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load request response series")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func analyticsStatusCodesSeriesHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		points, err := stats.ListStatusCodes(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load status code series")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func analyticsIpCountSeriesHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		points, err := stats.ListIpCount(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load ip count series")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func analyticsMethodSeriesHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		points, err := stats.ListMethodSeries(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load method series")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func analyticsProtocolSeriesHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		points, err := stats.ListProtocolSeries(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load protocol series")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func analyticsStatusCodesSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		summary, err := stats.SumStatusCodes(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load status code summary")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, summary)
+	}
+}
+
+func analyticsMethodSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		summary, err := stats.SumMethods(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load method summary")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, summary)
+	}
+}
+
+func analyticsProtocolSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		summary, err := stats.SumProtocols(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load protocol summary")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, summary)
+	}
+}
+
+func analyticsTopIpsSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		limit := 10
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+
+		rows, err := stats.ListTopIPs(r.Context(), start, end, serverID, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load top ips")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+func analyticsIspSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		limit := 10
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+
+		rows, err := stats.ListTopIsps(r.Context(), start, end, serverID, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load isp summary")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+func analyticsRefererSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		limit := 10
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+
+		rows, err := stats.ListTopReferers(r.Context(), start, end, serverID, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load referer summary")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+func analyticsCountrySummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		rows, err := stats.ListCountryRequests(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load country requests")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+func parseAnalyticsWindow(r *http.Request) (time.Time, time.Time, error) {
+	query := r.URL.Query()
+	if startRaw := strings.TrimSpace(query.Get("start")); startRaw != "" || strings.TrimSpace(query.Get("end")) != "" {
+		start, err := parseTimeValue(startRaw)
+		if err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+		end, err := parseTimeValue(strings.TrimSpace(query.Get("end")))
+		if err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+		if end.Before(start) {
+			return time.Time{}, time.Time{}, errors.New("end before start")
+		}
+		return start, end, nil
+	}
+
+	rangeValue := strings.ToLower(strings.TrimSpace(query.Get("range")))
+	now := time.Now()
+	switch rangeValue {
+	case "today":
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		return start, start.Add(24 * time.Hour), nil
+	case "yesterday":
+		end := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		return end.Add(-24 * time.Hour), end, nil
+	}
+
+	duration := parseTrafficRange(rangeValue)
+	return now.Add(-duration), now, nil
+}
+
+func parseTimeValue(value string) (time.Time, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return time.Time{}, errors.New("missing time value")
+	}
+	if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+		return parsed, nil
+	}
+	if parsed, err := time.ParseInLocation("2006-01-02T15:04", trimmed, time.Local); err == nil {
+		return parsed, nil
+	}
+	if parsed, err := time.ParseInLocation("2006-01-02 15:04:05", trimmed, time.Local); err == nil {
+		return parsed, nil
+	}
+	return time.Time{}, errors.New("invalid time format")
 }
 
 func loginHandler(users store.UserStore) http.HandlerFunc {
