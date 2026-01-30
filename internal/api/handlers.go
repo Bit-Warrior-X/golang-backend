@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ func registerRoutes(
 	l4 store.L4Store,
 	l4LiveAttack store.L4LiveAttackStore,
 	securityEvents store.SecurityEventStore,
+	serverTrafficStats store.ServerTrafficStatsStore,
 	wafWhitelist store.WafWhitelistStore,
 	wafBlacklist store.WafBlacklistStore,
 	wafGeo store.WafGeoStore,
@@ -54,10 +56,16 @@ func registerRoutes(
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
-	mux.HandleFunc("/dashboard/summary", dashboardSummaryHandler(users, servers, blacklist, l4LiveAttack))
-	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, blacklist, l4LiveAttack))
+	mux.HandleFunc("/dashboard/summary", dashboardSummaryHandler(users, servers, blacklist, l4LiveAttack, serverTrafficStats))
+	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, blacklist, l4LiveAttack, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/api/v1/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
+	mux.HandleFunc("/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats))
+	mux.HandleFunc("/dashboard/request-response", dashboardRequestResponseHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/dashboard/request-response", dashboardRequestResponseHandler(serverTrafficStats))
+	mux.HandleFunc("/dashboard/status-codes", dashboardStatusCodesHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/dashboard/status-codes", dashboardStatusCodesHandler(serverTrafficStats))
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
@@ -93,9 +101,11 @@ type dashboardSummaryResponse struct {
 	BlockedIps   int64 `json:"blockedIps"`
 	L4AttacksThisMonth int64 `json:"l4AttacksThisMonth"`
 	L4AttacksPreviousMonth int64 `json:"l4AttacksPreviousMonth"`
+	L7ThreatsThisMonth int64 `json:"l7ThreatsThisMonth"`
+	L7ThreatsPreviousMonth int64 `json:"l7ThreatsPreviousMonth"`
 }
 
-func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, blacklist store.BlacklistStore, l4LiveAttack store.L4LiveAttackStore) http.HandlerFunc {
+func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, blacklist store.BlacklistStore, l4LiveAttack store.L4LiveAttackStore, trafficStats store.ServerTrafficStatsStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -143,6 +153,18 @@ func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, b
 			return
 		}
 
+		l7ThisMonth, err := trafficStats.SumBlockedRequests(r.Context(), startOfMonth, startOfNextMonth)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load l7 threats this month")
+			return
+		}
+
+		l7PreviousMonth, err := trafficStats.SumBlockedRequests(r.Context(), startOfPreviousMonth, startOfMonth)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load l7 threats previous month")
+			return
+		}
+
 		writeJSON(w, http.StatusOK, dashboardSummaryResponse{
 			TotalUsers:   totalUsers,
 			TotalServers: totalServers,
@@ -150,6 +172,8 @@ func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, b
 			BlockedIps:   blockedIps,
 			L4AttacksThisMonth: l4ThisMonth,
 			L4AttacksPreviousMonth: l4PreviousMonth,
+			L7ThreatsThisMonth: l7ThisMonth,
+			L7ThreatsPreviousMonth: l7PreviousMonth,
 		})
 	}
 }
@@ -176,6 +200,176 @@ func dashboardSecurityEventsHandler(securityEvents store.SecurityEventStore) htt
 
 		writeJSON(w, http.StatusOK, events)
 	}
+}
+
+type bandwidthPoint struct {
+	Timestamp string `json:"timestamp"`
+	Bandwidth int64  `json:"bandwidth"`
+}
+
+type bandwidthSeries struct {
+	ServerID int64           `json:"serverId"`
+	Points   []bandwidthPoint `json:"points"`
+}
+
+func dashboardBandwidthHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		rangeValue := parseBandwidthRange(r.URL.Query().Get("range"))
+
+		var serverID int64
+		if rawServerID := strings.TrimSpace(r.URL.Query().Get("serverId")); rawServerID != "" {
+			parsed, err := strconv.ParseInt(rawServerID, 10, 64)
+			if err != nil || parsed < 0 {
+				writeError(w, http.StatusBadRequest, "invalid serverId")
+				return
+			}
+			serverID = parsed
+		}
+
+		end := time.Now()
+		start := end.Add(-rangeValue)
+
+		points, err := stats.ListBandwidth(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load bandwidth stats")
+			return
+		}
+
+		grouped := make(map[int64][]bandwidthPoint)
+		for _, point := range points {
+			grouped[point.ServerID] = append(grouped[point.ServerID], bandwidthPoint{
+				Timestamp: point.Timestamp,
+				Bandwidth: point.Bandwidth,
+			})
+		}
+
+		serverIDs := make([]int64, 0, len(grouped))
+		for id := range grouped {
+			serverIDs = append(serverIDs, id)
+		}
+		sort.Slice(serverIDs, func(i, j int) bool { return serverIDs[i] < serverIDs[j] })
+
+		series := make([]bandwidthSeries, 0, len(serverIDs))
+		for _, id := range serverIDs {
+			series = append(series, bandwidthSeries{
+				ServerID: id,
+				Points:   grouped[id],
+			})
+		}
+
+		writeJSON(w, http.StatusOK, series)
+	}
+}
+
+func dashboardRequestResponseHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		rangeValue := parseTrafficRange(r.URL.Query().Get("range"))
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		end := time.Now()
+		start := end.Add(-rangeValue)
+
+		points, err := stats.ListRequestResponse(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load request response stats")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func dashboardStatusCodesHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		rangeValue := parseTrafficRange(r.URL.Query().Get("range"))
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		end := time.Now()
+		start := end.Add(-rangeValue)
+
+		points, err := stats.ListStatusCodes(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load status code stats")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func parseBandwidthRange(value string) time.Duration {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1h":
+		return time.Hour
+	case "2h":
+		return 2 * time.Hour
+	case "4h":
+		return 4 * time.Hour
+	case "8h":
+		return 8 * time.Hour
+	case "12h":
+		return 12 * time.Hour
+	case "24h":
+		return 24 * time.Hour
+	default:
+		return 30 * time.Minute
+	}
+}
+
+func parseTrafficRange(value string) time.Duration {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	if trimmed == "" {
+		return 30 * time.Minute
+	}
+	if parsed, err := strconv.ParseInt(trimmed, 10, 64); err == nil && parsed > 0 {
+		return time.Duration(parsed) * time.Millisecond
+	}
+	if strings.HasSuffix(trimmed, "m") {
+		if minutes, err := strconv.ParseInt(strings.TrimSuffix(trimmed, "m"), 10, 64); err == nil && minutes > 0 {
+			return time.Duration(minutes) * time.Minute
+		}
+	}
+	if strings.HasSuffix(trimmed, "h") {
+		if hours, err := strconv.ParseInt(strings.TrimSuffix(trimmed, "h"), 10, 64); err == nil && hours > 0 {
+			return time.Duration(hours) * time.Hour
+		}
+	}
+	return 30 * time.Minute
+}
+
+func parseServerIDParam(value string) (int64, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil || parsed < 0 {
+		return 0, err
+	}
+	return parsed, nil
 }
 
 func loginHandler(users store.UserStore) http.HandlerFunc {
