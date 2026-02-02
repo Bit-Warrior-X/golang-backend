@@ -40,6 +40,7 @@ func registerRoutes(
 	servers store.ServerStore,
 	l4 store.L4Store,
 	l4LiveAttack store.L4LiveAttackStore,
+	l4AttackStats store.L4AttackStatsStore,
 	securityEvents store.SecurityEventStore,
 	serverTrafficStats store.ServerTrafficStatsStore,
 	wafWhitelist store.WafWhitelistStore,
@@ -113,6 +114,16 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/analytics/security/summary/top-referers", securityAnalyticsTopReferersHandler(serverTrafficStats))
 	mux.HandleFunc("/analytics/security/summary/top-user-agents", securityAnalyticsTopUserAgentsHandler(serverTrafficStats))
 	mux.HandleFunc("/api/v1/analytics/security/summary/top-user-agents", securityAnalyticsTopUserAgentsHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/l4/summary", l4AnalyticsSummaryHandler(l4AttackStats))
+	mux.HandleFunc("/api/v1/analytics/l4/summary", l4AnalyticsSummaryHandler(l4AttackStats))
+	mux.HandleFunc("/analytics/l4/series/traffic", l4AnalyticsTrafficSeriesHandler(l4AttackStats))
+	mux.HandleFunc("/api/v1/analytics/l4/series/traffic", l4AnalyticsTrafficSeriesHandler(l4AttackStats))
+	mux.HandleFunc("/analytics/l4/series/protocols", l4AnalyticsProtocolSeriesHandler(l4AttackStats))
+	mux.HandleFunc("/api/v1/analytics/l4/series/protocols", l4AnalyticsProtocolSeriesHandler(l4AttackStats))
+	mux.HandleFunc("/analytics/l4/attacks/recent", l4AnalyticsRecentAttacksHandler(l4AttackStats))
+	mux.HandleFunc("/api/v1/analytics/l4/attacks/recent", l4AnalyticsRecentAttacksHandler(l4AttackStats))
+	mux.HandleFunc("/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats))
+	mux.HandleFunc("/api/v1/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats))
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
@@ -1207,6 +1218,170 @@ func securityAnalyticsTopUserAgentsHandler(stats store.ServerTrafficStatsStore) 
 		}
 
 		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+type l4SummaryResponse struct {
+	TotalTraffic   int64 `json:"totalTraffic"`
+	AllowedTraffic int64 `json:"allowedTraffic"`
+	BlockedTraffic int64 `json:"blockedTraffic"`
+}
+
+func l4AnalyticsSummaryHandler(stats store.L4AttackStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		total, allowed, blocked, err := stats.SumTrafficTotals(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load l4 summary")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, l4SummaryResponse{
+			TotalTraffic:   total,
+			AllowedTraffic: allowed,
+			BlockedTraffic: blocked,
+		})
+	}
+}
+
+func l4AnalyticsTrafficSeriesHandler(stats store.L4AttackStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		points, err := stats.ListTrafficSeries(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load l4 traffic series")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func l4AnalyticsProtocolSeriesHandler(stats store.L4AttackStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		points, err := stats.ListProtocolSeries(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load l4 protocol series")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func l4AnalyticsRecentAttacksHandler(stats store.L4AttackStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		limit := 10
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+
+		rows, err := stats.ListRecentAttacks(r.Context(), start, end, serverID, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load recent attacks")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+func l4AnalyticsTopIpsHandler(stats store.L4AttackStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		limit := 10
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+
+		rows, err := stats.ListTopAttackIPs(r.Context(), start, end, serverID, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load top ips")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, rows)
 	}
 }
 
