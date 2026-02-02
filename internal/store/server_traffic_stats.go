@@ -38,23 +38,23 @@ type IpCountPoint struct {
 }
 
 type MethodSeriesPoint struct {
-	Timestamp   string `json:"timestamp"`
-	GetCount    int64  `json:"getCount"`
-	PostCount   int64  `json:"postCount"`
-	DeleteCount int64  `json:"deleteCount"`
-	PutCount    int64  `json:"putCount"`
-	HeadCount   int64  `json:"headCount"`
-	PatchCount  int64  `json:"patchCount"`
-	OptionsCount int64 `json:"optionsCount"`
-	OthersCount int64  `json:"othersCount"`
+	Timestamp    string `json:"timestamp"`
+	GetCount     int64  `json:"getCount"`
+	PostCount    int64  `json:"postCount"`
+	DeleteCount  int64  `json:"deleteCount"`
+	PutCount     int64  `json:"putCount"`
+	HeadCount    int64  `json:"headCount"`
+	PatchCount   int64  `json:"patchCount"`
+	OptionsCount int64  `json:"optionsCount"`
+	OthersCount  int64  `json:"othersCount"`
 }
 
 type ProtocolSeriesPoint struct {
-	Timestamp   string `json:"timestamp"`
-	Http1_0     int64  `json:"http1_0"`
-	Http1_1     int64  `json:"http1_1"`
-	Http2       int64  `json:"http2"`
-	Http3       int64  `json:"http3"`
+	Timestamp string `json:"timestamp"`
+	Http1_0   int64  `json:"http1_0"`
+	Http1_1   int64  `json:"http1_1"`
+	Http2     int64  `json:"http2"`
+	Http3     int64  `json:"http3"`
 }
 
 type StatusCodeSummary struct {
@@ -109,10 +109,25 @@ type TopRefererRow struct {
 	Requests int64  `json:"requests"`
 }
 
+type TopUrlRow struct {
+	URL      string `json:"url"`
+	Requests int64  `json:"requests"`
+}
+
+type TopUserAgentRow struct {
+	Agent    string `json:"agent"`
+	Requests int64  `json:"requests"`
+}
+
 type CountryRequestRow struct {
 	CountryCode string `json:"countryCode"`
 	Requests    int64  `json:"requests"`
 	Blocked     int64  `json:"blocked"`
+}
+
+type BlockedRequestPoint struct {
+	Timestamp string `json:"timestamp"`
+	Count     int64  `json:"count"`
 }
 
 type ServerTrafficStatsStore interface {
@@ -122,20 +137,26 @@ type ServerTrafficStatsStore interface {
 	ListStatusCodes(ctx context.Context, start, end time.Time, serverID int64) ([]StatusCodePoint, error)
 	ListTraffic(ctx context.Context, start, end time.Time, serverID int64) ([]TrafficPoint, error)
 	ListIpCount(ctx context.Context, start, end time.Time, serverID int64) ([]IpCountPoint, error)
+	ListBlockedRequestSeries(ctx context.Context, start, end time.Time, serverID int64) ([]BlockedRequestPoint, error)
 	ListMethodSeries(ctx context.Context, start, end time.Time, serverID int64) ([]MethodSeriesPoint, error)
 	ListProtocolSeries(ctx context.Context, start, end time.Time, serverID int64) ([]ProtocolSeriesPoint, error)
 	SumStatusCodes(ctx context.Context, start, end time.Time, serverID int64) (StatusCodeSummary, error)
 	SumMethods(ctx context.Context, start, end time.Time, serverID int64) (MethodSummary, error)
 	SumProtocols(ctx context.Context, start, end time.Time, serverID int64) (ProtocolSummary, error)
 	SumTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, int64, error)
+	SumSecurityTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, int64, error)
 	LatestBandwidth(ctx context.Context, start, end time.Time, serverID int64) (int64, time.Time, error)
 	SumBlockedRequests(ctx context.Context, start, end time.Time) (int64, error)
 	ListTopIPs(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]TopIPRow, error)
 	ListTopIsps(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]TopIspRow, error)
 	ListTopReferers(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]TopRefererRow, error)
+	ListTopUrls(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]TopUrlRow, error)
+	ListTopUserAgents(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]TopUserAgentRow, error)
 	SumIspRequests(ctx context.Context, start, end time.Time, serverID int64) (int64, error)
 	SumRefererRequests(ctx context.Context, start, end time.Time, serverID int64) (int64, error)
 	ListCountryRequests(ctx context.Context, start, end time.Time, serverID int64) ([]CountryRequestRow, error)
+	ListCountryRequestsByRequests(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]CountryRequestRow, error)
+	ListCountryRequestsByBlocked(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]CountryRequestRow, error)
 }
 
 type serverTrafficStatsStore struct {
@@ -416,6 +437,82 @@ func (store *serverTrafficStatsStore) ListTopReferers(ctx context.Context, start
 	return rowsOut, nil
 }
 
+func (store *serverTrafficStatsStore) ListTopUrls(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]TopUrlRow, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT request_url AS url,
+		       SUM(request_count) AS request_count
+		FROM url_request_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)
+		GROUP BY request_url
+		ORDER BY request_count DESC
+		LIMIT ?`,
+		start,
+		end,
+		serverID,
+		serverID,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rowsOut []TopUrlRow
+	for rows.Next() {
+		var row TopUrlRow
+		if err := rows.Scan(&row.URL, &row.Requests); err != nil {
+			return nil, err
+		}
+		rowsOut = append(rowsOut, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return rowsOut, nil
+}
+
+func (store *serverTrafficStatsStore) ListTopUserAgents(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]TopUserAgentRow, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT request_useragent AS agent,
+		       SUM(request_count) AS request_count
+		FROM useragent_request_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)
+		GROUP BY request_useragent
+		ORDER BY request_count DESC
+		LIMIT ?`,
+		start,
+		end,
+		serverID,
+		serverID,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rowsOut []TopUserAgentRow
+	for rows.Next() {
+		var row TopUserAgentRow
+		if err := rows.Scan(&row.Agent, &row.Requests); err != nil {
+			return nil, err
+		}
+		rowsOut = append(rowsOut, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return rowsOut, nil
+}
+
 func (store *serverTrafficStatsStore) SumIspRequests(ctx context.Context, start, end time.Time, serverID int64) (int64, error) {
 	var total int64
 	row := store.db.QueryRowContext(ctx, `
@@ -466,6 +563,84 @@ func (store *serverTrafficStatsStore) ListCountryRequests(ctx context.Context, s
 		end,
 		serverID,
 		serverID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rowsOut []CountryRequestRow
+	for rows.Next() {
+		var row CountryRequestRow
+		if err := rows.Scan(&row.CountryCode, &row.Requests, &row.Blocked); err != nil {
+			return nil, err
+		}
+		rowsOut = append(rowsOut, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return rowsOut, nil
+}
+
+func (store *serverTrafficStatsStore) ListCountryRequestsByRequests(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]CountryRequestRow, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT country_code,
+		       SUM(request_count) AS request_count,
+		       SUM(blocked_request_count) AS blocked_request_count
+		FROM country_request_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)
+		GROUP BY country_code
+		ORDER BY request_count DESC
+		LIMIT ?`,
+		start,
+		end,
+		serverID,
+		serverID,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rowsOut []CountryRequestRow
+	for rows.Next() {
+		var row CountryRequestRow
+		if err := rows.Scan(&row.CountryCode, &row.Requests, &row.Blocked); err != nil {
+			return nil, err
+		}
+		rowsOut = append(rowsOut, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return rowsOut, nil
+}
+
+func (store *serverTrafficStatsStore) ListCountryRequestsByBlocked(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]CountryRequestRow, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT country_code,
+		       SUM(request_count) AS request_count,
+		       SUM(blocked_request_count) AS blocked_request_count
+		FROM country_request_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)
+		GROUP BY country_code
+		ORDER BY blocked_request_count DESC
+		LIMIT ?`,
+		start,
+		end,
+		serverID,
+		serverID,
+		limit,
 	)
 	if err != nil {
 		return nil, err
@@ -541,6 +716,40 @@ func (store *serverTrafficStatsStore) ListIpCount(ctx context.Context, start, en
 	var points []IpCountPoint
 	for rows.Next() {
 		var item IpCountPoint
+		var bucket time.Time
+		if err := rows.Scan(&bucket, &item.Count); err != nil {
+			return nil, err
+		}
+		item.Timestamp = bucket.Format(time.RFC3339)
+		points = append(points, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return points, nil
+}
+
+func (store *serverTrafficStatsStore) ListBlockedRequestSeries(ctx context.Context, start, end time.Time, serverID int64) ([]BlockedRequestPoint, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT bucket_ts, SUM(blocked_request_count) AS blocked_request_count
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)
+		GROUP BY bucket_ts
+		ORDER BY bucket_ts`,
+		start,
+		end,
+		serverID,
+		serverID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var points []BlockedRequestPoint
+	for rows.Next() {
+		var item BlockedRequestPoint
 		var bucket time.Time
 		if err := rows.Scan(&bucket, &item.Count); err != nil {
 			return nil, err
@@ -786,6 +995,31 @@ func (store *serverTrafficStatsStore) SumTotals(ctx context.Context, start, end 
 		return 0, 0, 0, 0, err
 	}
 	return totalTraffic, totalRequest, totalResponse, totalIp, nil
+}
+
+func (store *serverTrafficStatsStore) SumSecurityTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, int64, error) {
+	var totalRequest int64
+	var blockedRequest int64
+	var totalIp int64
+	var blockedIp int64
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(request_count), 0),
+			COALESCE(SUM(blocked_request_count), 0),
+			COALESCE(SUM(ip_count), 0),
+			COALESCE(SUM(blocked_ip_count), 0)
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)`,
+		start,
+		end,
+		serverID,
+		serverID,
+	)
+	if err := row.Scan(&totalRequest, &blockedRequest, &totalIp, &blockedIp); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return totalRequest, blockedRequest, totalIp, blockedIp, nil
 }
 
 func (store *serverTrafficStatsStore) LatestBandwidth(ctx context.Context, start, end time.Time, serverID int64) (int64, time.Time, error) {

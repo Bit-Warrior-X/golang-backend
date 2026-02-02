@@ -97,6 +97,22 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/analytics/summary/referers", analyticsRefererSummaryHandler(serverTrafficStats))
 	mux.HandleFunc("/analytics/summary/countries", analyticsCountrySummaryHandler(serverTrafficStats))
 	mux.HandleFunc("/api/v1/analytics/summary/countries", analyticsCountrySummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/security/summary", securityAnalyticsSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/security/summary", securityAnalyticsSummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/security/series/block-count", securityAnalyticsBlockedSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/security/series/block-count", securityAnalyticsBlockedSeriesHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/security/summary/countries", securityAnalyticsCountrySummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/security/summary/countries", securityAnalyticsCountrySummaryHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/security/summary/top-requests", securityAnalyticsTopRequestsHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/security/summary/top-requests", securityAnalyticsTopRequestsHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/security/summary/top-blocks", securityAnalyticsTopBlocksHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/security/summary/top-blocks", securityAnalyticsTopBlocksHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/security/summary/top-urls", securityAnalyticsTopUrlsHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/security/summary/top-urls", securityAnalyticsTopUrlsHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/security/summary/top-referers", securityAnalyticsTopReferersHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/security/summary/top-referers", securityAnalyticsTopReferersHandler(serverTrafficStats))
+	mux.HandleFunc("/analytics/security/summary/top-user-agents", securityAnalyticsTopUserAgentsHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/analytics/security/summary/top-user-agents", securityAnalyticsTopUserAgentsHandler(serverTrafficStats))
 	mux.HandleFunc("/auth/login", loginHandler(users))
 	mux.HandleFunc("/servers", serversHandler(servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
@@ -126,13 +142,13 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type dashboardSummaryResponse struct {
-	TotalUsers   int64 `json:"totalUsers"`
-	TotalServers int64 `json:"totalServers"`
-	ActiveServers int64 `json:"activeServers"`
-	BlockedIps   int64 `json:"blockedIps"`
-	L4AttacksThisMonth int64 `json:"l4AttacksThisMonth"`
+	TotalUsers             int64 `json:"totalUsers"`
+	TotalServers           int64 `json:"totalServers"`
+	ActiveServers          int64 `json:"activeServers"`
+	BlockedIps             int64 `json:"blockedIps"`
+	L4AttacksThisMonth     int64 `json:"l4AttacksThisMonth"`
 	L4AttacksPreviousMonth int64 `json:"l4AttacksPreviousMonth"`
-	L7ThreatsThisMonth int64 `json:"l7ThreatsThisMonth"`
+	L7ThreatsThisMonth     int64 `json:"l7ThreatsThisMonth"`
 	L7ThreatsPreviousMonth int64 `json:"l7ThreatsPreviousMonth"`
 }
 
@@ -197,13 +213,13 @@ func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, b
 		}
 
 		writeJSON(w, http.StatusOK, dashboardSummaryResponse{
-			TotalUsers:   totalUsers,
-			TotalServers: totalServers,
-			ActiveServers: activeServers,
-			BlockedIps:   blockedIps,
-			L4AttacksThisMonth: l4ThisMonth,
+			TotalUsers:             totalUsers,
+			TotalServers:           totalServers,
+			ActiveServers:          activeServers,
+			BlockedIps:             blockedIps,
+			L4AttacksThisMonth:     l4ThisMonth,
 			L4AttacksPreviousMonth: l4PreviousMonth,
-			L7ThreatsThisMonth: l7ThisMonth,
+			L7ThreatsThisMonth:     l7ThisMonth,
 			L7ThreatsPreviousMonth: l7PreviousMonth,
 		})
 	}
@@ -239,7 +255,7 @@ type bandwidthPoint struct {
 }
 
 type bandwidthSeries struct {
-	ServerID int64           `json:"serverId"`
+	ServerID int64            `json:"serverId"`
 	Points   []bandwidthPoint `json:"points"`
 }
 
@@ -404,14 +420,14 @@ func parseServerIDParam(value string) (int64, error) {
 }
 
 type analyticsSummaryResponse struct {
-	TotalTraffic     int64  `json:"totalTraffic"`
-	BandwidthLast    int64  `json:"bandwidthLast"`
+	TotalTraffic      int64  `json:"totalTraffic"`
+	BandwidthLast     int64  `json:"bandwidthLast"`
 	BandwidthLastTime string `json:"bandwidthLastTime"`
-	TotalRequest     int64  `json:"totalRequest"`
-	TotalResponse    int64  `json:"totalResponse"`
-	IpCount          int64  `json:"ipCount"`
-	RefererCount     int64  `json:"refererCount"`
-	IspCount         int64  `json:"ispCount"`
+	TotalRequest      int64  `json:"totalRequest"`
+	TotalResponse     int64  `json:"totalResponse"`
+	IpCount           int64  `json:"ipCount"`
+	RefererCount      int64  `json:"refererCount"`
+	IspCount          int64  `json:"ispCount"`
 }
 
 func analyticsSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
@@ -457,14 +473,14 @@ func analyticsSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFu
 		}
 
 		writeJSON(w, http.StatusOK, analyticsSummaryResponse{
-			TotalTraffic:     totalTraffic,
-			BandwidthLast:    bandwidthLast,
+			TotalTraffic:      totalTraffic,
+			BandwidthLast:     bandwidthLast,
 			BandwidthLastTime: bandwidthTime.Format(time.RFC3339),
-			TotalRequest:     totalRequest,
-			TotalResponse:    totalResponse,
-			IpCount:          totalIp,
-			RefererCount:     refererCount,
-			IspCount:         ispCount,
+			TotalRequest:      totalRequest,
+			TotalResponse:     totalResponse,
+			IpCount:           totalIp,
+			RefererCount:      refererCount,
+			IspCount:          ispCount,
 		})
 	}
 }
@@ -879,6 +895,318 @@ func analyticsCountrySummaryHandler(stats store.ServerTrafficStatsStore) http.Ha
 		}
 
 		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+type securityAnalyticsSummaryResponse struct {
+	TotalRequestCounts int64 `json:"totalRequestCounts"`
+	BlockRequestCounts int64 `json:"blockRequestCounts"`
+	TotalIps           int64 `json:"totalIps"`
+	BlacklistedIps     int64 `json:"blacklistedIps"`
+}
+
+type securityCountryRow struct {
+	Code  string `json:"code"`
+	Name  string `json:"name"`
+	Count int64  `json:"count"`
+}
+
+type securityAreaRow struct {
+	Area  string `json:"area"`
+	Count int64  `json:"count"`
+}
+
+type securityUrlRow struct {
+	URL   string `json:"url"`
+	Count int64  `json:"count"`
+}
+
+type securityRefererRow struct {
+	Referer string `json:"referer"`
+	Count   int64  `json:"count"`
+}
+
+type securityAgentRow struct {
+	Agent string `json:"agent"`
+	Count int64  `json:"count"`
+}
+
+func securityAnalyticsSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		totalRequest, blockedRequest, totalIp, blockedIp, err := stats.SumSecurityTotals(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load security analytics summary")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, securityAnalyticsSummaryResponse{
+			TotalRequestCounts: totalRequest,
+			BlockRequestCounts: blockedRequest,
+			TotalIps:           totalIp,
+			BlacklistedIps:     blockedIp,
+		})
+	}
+}
+
+func securityAnalyticsBlockedSeriesHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		points, err := stats.ListBlockedRequestSeries(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load block count series")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, points)
+	}
+}
+
+func securityAnalyticsCountrySummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		rows, err := stats.ListCountryRequests(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load country requests")
+			return
+		}
+
+		out := make([]securityCountryRow, 0, len(rows))
+		for _, row := range rows {
+			code := strings.ToUpper(strings.TrimSpace(row.CountryCode))
+			out = append(out, securityCountryRow{
+				Code:  code,
+				Name:  code,
+				Count: row.Requests,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+func securityAnalyticsTopRequestsHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		rows, err := stats.ListCountryRequestsByRequests(r.Context(), start, end, serverID, 30)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load top requests")
+			return
+		}
+
+		out := make([]securityAreaRow, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, securityAreaRow{
+				Area:  strings.ToUpper(strings.TrimSpace(row.CountryCode)),
+				Count: row.Requests,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+func securityAnalyticsTopBlocksHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		rows, err := stats.ListCountryRequestsByBlocked(r.Context(), start, end, serverID, 30)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load top blocks")
+			return
+		}
+
+		out := make([]securityAreaRow, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, securityAreaRow{
+				Area:  strings.ToUpper(strings.TrimSpace(row.CountryCode)),
+				Count: row.Blocked,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+func securityAnalyticsTopUrlsHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		rows, err := stats.ListTopUrls(r.Context(), start, end, serverID, 10)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load top urls")
+			return
+		}
+
+		out := make([]securityUrlRow, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, securityUrlRow{
+				URL:   row.URL,
+				Count: row.Requests,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+func securityAnalyticsTopReferersHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		rows, err := stats.ListTopReferers(r.Context(), start, end, serverID, 10)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load top referers")
+			return
+		}
+
+		out := make([]securityRefererRow, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, securityRefererRow{
+				Referer: row.Referer,
+				Count:   row.Requests,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+func securityAnalyticsTopUserAgentsHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		start, end, err := parseAnalyticsWindow(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid time range")
+			return
+		}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+
+		rows, err := stats.ListTopUserAgents(r.Context(), start, end, serverID, 10)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load top user agents")
+			return
+		}
+
+		out := make([]securityAgentRow, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, securityAgentRow{
+				Agent: row.Agent,
+				Count: row.Requests,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, out)
 	}
 }
 
