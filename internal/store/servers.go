@@ -21,6 +21,7 @@ type Server struct {
 	SSHUser     string
 	SSHPassword string
 	SSHPort     string
+	Token       string
 	Created     sql.NullTime
 	Expired     sql.NullTime
 }
@@ -43,6 +44,7 @@ type ServerView struct {
 	Users          int      `json:"users"`
 	ManagedUsers   []string `json:"managedUsers"`
 	ManagedUserIds []int64  `json:"managedUserIds"`
+	Token          string   `json:"-"`
 }
 
 type ServerInput struct {
@@ -270,6 +272,7 @@ func (store *serverStore) GetView(ctx context.Context, serverID int64) (ServerVi
 		Users:          len(users),
 		ManagedUsers:   names,
 		ManagedUserIds: ids,
+		Token:          server.Token,
 	}, nil
 }
 
@@ -307,7 +310,7 @@ func (store *serverStore) UpdateServerUsers(ctx context.Context, serverID int64,
 
 func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, created, expired
+		SELECT id, name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
 		FROM servers
 		ORDER BY id DESC`)
 	if err != nil {
@@ -327,6 +330,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 		var sshUser sql.NullString
 		var sshPassword sql.NullString
 		var sshPort sql.NullInt64
+		var token sql.NullString
 		if err := rows.Scan(
 			&item.ID,
 			&name,
@@ -338,6 +342,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 			&sshUser,
 			&sshPassword,
 			&sshPort,
+			&token,
 			&item.Created,
 			&item.Expired,
 		); err != nil {
@@ -352,6 +357,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 		item.SSHUser = nullStringValue(sshUser)
 		item.SSHPassword = nullStringValue(sshPassword)
 		item.SSHPort = nullIntStringValue(sshPort)
+		item.Token = nullStringValue(token)
 		servers = append(servers, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -362,7 +368,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 
 func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, created, expired
+		SELECT id, name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
 		FROM servers
 		WHERE id = ?`, serverID)
 
@@ -376,6 +382,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 	var sshUser sql.NullString
 	var sshPassword sql.NullString
 	var sshPort sql.NullInt64
+	var token sql.NullString
 	if err := row.Scan(
 		&item.ID,
 		&name,
@@ -387,6 +394,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 		&sshUser,
 		&sshPassword,
 		&sshPort,
+		&token,
 		&item.Created,
 		&item.Expired,
 	); err != nil {
@@ -402,6 +410,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 	item.SSHUser = nullStringValue(sshUser)
 	item.SSHPassword = nullStringValue(sshPassword)
 	item.SSHPort = nullIntStringValue(sshPort)
+	item.Token = nullStringValue(token)
 	return item, nil
 }
 

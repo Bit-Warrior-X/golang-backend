@@ -36,6 +36,7 @@ type errorResponse struct {
 
 func registerRoutes(
 	mux *http.ServeMux,
+	agentClient *AgentClient,
 	users store.UserStore,
 	servers store.ServerStore,
 	l4 store.L4Store,
@@ -128,7 +129,7 @@ func registerRoutes(
 	mux.HandleFunc("/servers", serversHandler(servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
 	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(blacklist))
-	mux.HandleFunc("/servers/", serverDetailHandler(servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers))
+	mux.HandleFunc("/servers/", serverDetailHandler(agentClient, servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -1812,6 +1813,7 @@ func serverBlacklistHandler(blacklist store.BlacklistStore) http.HandlerFunc {
 }
 
 func serverDetailHandler(
+	agentClient *AgentClient,
 	servers store.ServerStore,
 	l4 store.L4Store,
 	wafWhitelist store.WafWhitelistStore,
@@ -1859,6 +1861,43 @@ func serverDetailHandler(
 			return
 		}
 
+		if strings.HasSuffix(r.URL.Path, "/l4/options") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/l4/options")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			if agentClient == nil {
+				writeError(w, http.StatusInternalServerError, "agent client not configured")
+				return
+			}
+			server, err := servers.GetView(r.Context(), serverID)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "server not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to load server data")
+				return
+			}
+			options, err := agentClient.FetchL4Options(r.Context(), server.IP, server.Token)
+			if err != nil {
+				var agentErr AgentResponseError
+				if errors.As(err, &agentErr) {
+					writeError(w, http.StatusBadGateway, agentErr.Error())
+					return
+				}
+				writeError(w, http.StatusBadGateway, "failed to load l4 options from server agent")
+				return
+			}
+			writeJSON(w, http.StatusOK, options)
+			return
+		}
+
 		if strings.HasSuffix(r.URL.Path, "/l4") {
 			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/l4")
 			if !ok {
@@ -1881,6 +1920,28 @@ func serverDetailHandler(
 				var payload store.L4Config
 				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				if agentClient == nil {
+					writeError(w, http.StatusInternalServerError, "agent client not configured")
+					return
+				}
+				server, err := servers.GetView(r.Context(), serverID)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to load server data")
+					return
+				}
+				if err := agentClient.PushL4(r.Context(), server.IP, server.Token, payload); err != nil {
+					var agentErr AgentResponseError
+					if errors.As(err, &agentErr) {
+						writeError(w, http.StatusBadGateway, agentErr.Error())
+						return
+					}
+					writeError(w, http.StatusBadGateway, "failed to apply l4 config to server agent")
 					return
 				}
 				if err := l4.UpdateByServerID(r.Context(), serverID, payload); err != nil {

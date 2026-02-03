@@ -30,7 +30,8 @@ func NewRouter(
 ) http.Handler {
 	mux := http.NewServeMux()
 
-	registerRoutes(mux, users, servers, l4, l4LiveAttack, l4AttackStats, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, blacklist)
+	agentClient := NewAgentClient(cfg)
+	registerRoutes(mux, agentClient, users, servers, l4, l4LiveAttack, l4AttackStats, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, blacklist)
 
 	handler := withCORS(cfg, mux)
 	handler = withRequestLogging(handler)

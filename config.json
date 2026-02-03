@@ -11,5 +11,11 @@
   "dbHost": "192.168.147.3",
   "dbPort": "3306",
   "dbName": "cdnproxy",
-  "dsn": ""
+  "dsn": "",
+  "agentScheme": "http",
+  "agentPort": "5000",
+  "agentL4Path": "/API/L4/l4_firewall_data",
+  "agentL4OptionsPath": "/API/L4/options",
+  "agentToken": "",
+  "agentTimeoutSeconds": 5
 }

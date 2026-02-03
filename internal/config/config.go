@@ -3,29 +3,41 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	Port           string
-	AllowedOrigins []string
-	AllowAllCORS   bool
-	DBUser         string
-	DBPassword     string
-	DBHost         string
-	DBPort         string
-	DBName         string
-	DSN            string
+	Port                string
+	AllowedOrigins      []string
+	AllowAllCORS        bool
+	DBUser              string
+	DBPassword          string
+	DBHost              string
+	DBPort              string
+	DBName              string
+	DSN                 string
+	AgentScheme         string
+	AgentPort           string
+	AgentL4Path         string
+	AgentL4OptionsPath  string
+	AgentToken          string
+	AgentTimeoutSeconds int
 }
 
 func Load() Config {
 	cfg := Config{
-		Port:         "8080",
-		AllowAllCORS: true,
-		DBUser:       "root",
-		DBHost:       "127.0.0.1",
-		DBPort:       "3306",
-		DBName:       "cdnproxy",
+		Port:                "8080",
+		AllowAllCORS:        true,
+		DBUser:              "root",
+		DBHost:              "127.0.0.1",
+		DBPort:              "3306",
+		DBName:              "cdnproxy",
+		AgentScheme:         "http",
+		AgentPort:           "5000",
+		AgentL4Path:         "/API/L4/l4_firewall_data",
+		AgentL4OptionsPath:  "/API/L4/options",
+		AgentTimeoutSeconds: 3,
 	}
 
 	configPath := strings.TrimSpace(os.Getenv("CONFIG_FILE"))
@@ -57,6 +69,26 @@ func Load() Config {
 	if dsn := strings.TrimSpace(os.Getenv("DB_DSN")); dsn != "" {
 		cfg.DSN = dsn
 	}
+	if agentScheme := strings.TrimSpace(os.Getenv("AGENT_SCHEME")); agentScheme != "" {
+		cfg.AgentScheme = agentScheme
+	}
+	if agentPort := strings.TrimSpace(os.Getenv("AGENT_PORT")); agentPort != "" {
+		cfg.AgentPort = agentPort
+	}
+	if agentL4Path := strings.TrimSpace(os.Getenv("AGENT_L4_PATH")); agentL4Path != "" {
+		cfg.AgentL4Path = agentL4Path
+	}
+	if agentL4OptionsPath := strings.TrimSpace(os.Getenv("AGENT_L4_OPTIONS_PATH")); agentL4OptionsPath != "" {
+		cfg.AgentL4OptionsPath = agentL4OptionsPath
+	}
+	if os.Getenv("AGENT_TOKEN") != "" {
+		cfg.AgentToken = os.Getenv("AGENT_TOKEN")
+	}
+	if timeoutRaw := strings.TrimSpace(os.Getenv("AGENT_TIMEOUT_SECONDS")); timeoutRaw != "" {
+		if parsed, err := strconv.Atoi(timeoutRaw); err == nil && parsed > 0 {
+			cfg.AgentTimeoutSeconds = parsed
+		}
+	}
 
 	if origins := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS")); origins != "" {
 		cfg.AllowedOrigins = splitAndTrim(origins)
@@ -83,15 +115,21 @@ func splitAndTrim(value string) []string {
 }
 
 type fileConfig struct {
-	Port           *string  `json:"port"`
-	AllowedOrigins []string `json:"allowedOrigins"`
-	AllowAllCORS   *bool    `json:"allowAllCors"`
-	DBUser         *string  `json:"dbUser"`
-	DBPassword     *string  `json:"dbPassword"`
-	DBHost         *string  `json:"dbHost"`
-	DBPort         *string  `json:"dbPort"`
-	DBName         *string  `json:"dbName"`
-	DSN            *string  `json:"dsn"`
+	Port                *string  `json:"port"`
+	AllowedOrigins      []string `json:"allowedOrigins"`
+	AllowAllCORS        *bool    `json:"allowAllCors"`
+	DBUser              *string  `json:"dbUser"`
+	DBPassword          *string  `json:"dbPassword"`
+	DBHost              *string  `json:"dbHost"`
+	DBPort              *string  `json:"dbPort"`
+	DBName              *string  `json:"dbName"`
+	DSN                 *string  `json:"dsn"`
+	AgentScheme         *string  `json:"agentScheme"`
+	AgentPort           *string  `json:"agentPort"`
+	AgentL4Path         *string  `json:"agentL4Path"`
+	AgentL4OptionsPath  *string  `json:"agentL4OptionsPath"`
+	AgentToken          *string  `json:"agentToken"`
+	AgentTimeoutSeconds *int     `json:"agentTimeoutSeconds"`
 }
 
 func loadFileConfig(path string) (*fileConfig, error) {
@@ -136,5 +174,23 @@ func applyFileConfig(cfg *Config, fileCfg fileConfig) {
 	}
 	if fileCfg.DSN != nil && strings.TrimSpace(*fileCfg.DSN) != "" {
 		cfg.DSN = strings.TrimSpace(*fileCfg.DSN)
+	}
+	if fileCfg.AgentScheme != nil && strings.TrimSpace(*fileCfg.AgentScheme) != "" {
+		cfg.AgentScheme = strings.TrimSpace(*fileCfg.AgentScheme)
+	}
+	if fileCfg.AgentPort != nil && strings.TrimSpace(*fileCfg.AgentPort) != "" {
+		cfg.AgentPort = strings.TrimSpace(*fileCfg.AgentPort)
+	}
+	if fileCfg.AgentL4Path != nil && strings.TrimSpace(*fileCfg.AgentL4Path) != "" {
+		cfg.AgentL4Path = strings.TrimSpace(*fileCfg.AgentL4Path)
+	}
+	if fileCfg.AgentL4OptionsPath != nil && strings.TrimSpace(*fileCfg.AgentL4OptionsPath) != "" {
+		cfg.AgentL4OptionsPath = strings.TrimSpace(*fileCfg.AgentL4OptionsPath)
+	}
+	if fileCfg.AgentToken != nil {
+		cfg.AgentToken = *fileCfg.AgentToken
+	}
+	if fileCfg.AgentTimeoutSeconds != nil && *fileCfg.AgentTimeoutSeconds > 0 {
+		cfg.AgentTimeoutSeconds = *fileCfg.AgentTimeoutSeconds
 	}
 }
