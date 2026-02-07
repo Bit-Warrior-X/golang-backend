@@ -8,6 +8,7 @@ import (
 
 type L4LiveAttackStore interface {
 	CountBetween(ctx context.Context, start, end time.Time) (int64, error)
+	Create(ctx context.Context, serverID int64, sourceIP, attackType string) error
 }
 
 type l4LiveAttackStore struct {
@@ -31,4 +32,21 @@ func (store *l4LiveAttackStore) CountBetween(ctx context.Context, start, end tim
 		return 0, err
 	}
 	return total, nil
+}
+
+func (store *l4LiveAttackStore) Create(ctx context.Context, serverID int64, sourceIP, attackType string) error {
+	_, err := store.db.ExecContext(ctx, `
+		INSERT INTO l4_live_attack (server_id, source_ip, attack_type, created_at)
+		VALUES (?, ?, ?, NOW())`,
+		serverID,
+		sourceIP,
+		attackType,
+	)
+	if err != nil {
+		if isForeignKeyViolation(err) {
+			return errNotFound
+		}
+		return err
+	}
+	return nil
 }

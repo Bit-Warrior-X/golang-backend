@@ -15,6 +15,7 @@ type SecurityEvent struct {
 
 type SecurityEventStore interface {
 	ListRecent(ctx context.Context, limit int) ([]SecurityEvent, error)
+	Create(ctx context.Context, title, description string) error
 }
 
 type securityEventStore struct {
@@ -55,4 +56,14 @@ func (store *securityEventStore) ListRecent(ctx context.Context, limit int) ([]S
 		return nil, err
 	}
 	return events, nil
+}
+
+func (store *securityEventStore) Create(ctx context.Context, title, description string) error {
+	_, err := store.db.ExecContext(ctx, `
+		INSERT INTO security_events (title, description, created_at, updated_at)
+		VALUES (?, ?, NOW(), NOW())`,
+		title,
+		description,
+	)
+	return err
 }

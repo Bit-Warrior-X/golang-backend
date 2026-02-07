@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -67,6 +68,7 @@ type ServerStore interface {
 	UpdateServerUsers(ctx context.Context, serverID int64, userIDs []int64) error
 	Create(ctx context.Context, input ServerInput) (Server, error)
 	GetView(ctx context.Context, serverID int64) (ServerView, error)
+	GetByToken(ctx context.Context, token string) (Server, error)
 	Update(ctx context.Context, serverID int64, input ServerInput) error
 	Delete(ctx context.Context, serverID int64) error
 }
@@ -411,6 +413,57 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 	item.SSHPassword = nullStringValue(sshPassword)
 	item.SSHPort = nullIntStringValue(sshPort)
 	item.Token = nullStringValue(token)
+	return item, nil
+}
+
+func (store *serverStore) GetByToken(ctx context.Context, token string) (Server, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
+		FROM servers
+		WHERE token = ?`, token)
+
+	var item Server
+	var name sql.NullString
+	var ip sql.NullString
+	var status sql.NullString
+	var licenseType sql.NullString
+	var licenseFile sql.NullString
+	var version sql.NullString
+	var sshUser sql.NullString
+	var sshPassword sql.NullString
+	var sshPort sql.NullInt64
+	var tokenValue sql.NullString
+	if err := row.Scan(
+		&item.ID,
+		&name,
+		&ip,
+		&status,
+		&licenseType,
+		&licenseFile,
+		&version,
+		&sshUser,
+		&sshPassword,
+		&sshPort,
+		&tokenValue,
+		&item.Created,
+		&item.Expired,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Server{}, errNotFound
+		}
+		return Server{}, err
+	}
+
+	item.Name = nullStringValue(name)
+	item.IP = nullStringValue(ip)
+	item.Status = nullStringValue(status)
+	item.LicenseType = nullStringValue(licenseType)
+	item.LicenseFile = nullStringValue(licenseFile)
+	item.Version = nullStringValue(version)
+	item.SSHUser = nullStringValue(sshUser)
+	item.SSHPassword = nullStringValue(sshPassword)
+	item.SSHPort = nullIntStringValue(sshPort)
+	item.Token = nullStringValue(tokenValue)
 	return item, nil
 }
 

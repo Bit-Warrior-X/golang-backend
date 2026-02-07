@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -59,6 +60,8 @@ func registerRoutes(
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
+	mux.HandleFunc("/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack))
+	mux.HandleFunc("/api/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack))
 	mux.HandleFunc("/dashboard/summary", dashboardSummaryHandler(users, servers, blacklist, l4LiveAttack, serverTrafficStats))
 	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, blacklist, l4LiveAttack, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
@@ -151,6 +154,155 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"version": "v1",
 	})
+}
+
+type reportXdpPayload struct {
+	Token      string `json:"token"`
+	Command    string `json:"command"`
+	Data       string `json:"data"`
+	IP         string `json:"ip"`
+	TTL        string `json:"ttl"`
+	AttackType string `json:"attack_type"`
+}
+
+func reportXdpHandler(securityEvents store.SecurityEventStore, servers store.ServerStore, blacklist store.BlacklistStore, l4LiveAttack store.L4LiveAttackStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		var payload reportXdpPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+
+		payload.Command = strings.TrimSpace(payload.Command)
+		payload.Token = strings.TrimSpace(payload.Token)
+		payload.Data = strings.TrimSpace(payload.Data)
+		payload.IP = strings.TrimSpace(payload.IP)
+		payload.TTL = strings.TrimSpace(payload.TTL)
+		payload.AttackType = strings.TrimSpace(payload.AttackType)
+
+		if payload.Token == "" {
+			writeError(w, http.StatusForbidden, "missing token")
+			return
+		}
+
+		server, err := servers.GetByToken(r.Context(), payload.Token)
+		if err != nil {
+			if store.IsNotFound(err) {
+				writeError(w, http.StatusForbidden, "invalid token")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to validate token")
+			return
+		}
+
+		if strings.EqualFold(payload.Command, "report_block_ip") {
+			if payload.IP == "" {
+				writeError(w, http.StatusBadRequest, "missing ip")
+				return
+			}
+			input := buildBlacklistInput(server.Name, payload)
+			if _, err := blacklist.Create(r.Context(), server.ID, input); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to store blacklist entry")
+				return
+			}
+			if err := l4LiveAttack.Create(r.Context(), server.ID, payload.IP, payload.AttackType); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to store l4 live attack")
+				return
+			}
+			title, description, ok := buildSecurityEvent(payload)
+			if ok {
+				if err := securityEvents.Create(r.Context(), title, description); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to store security event")
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		title, description, ok := buildSecurityEvent(payload)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unsupported command or data")
+			return
+		}
+
+		if err := securityEvents.Create(r.Context(), title, description); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to store security event")
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func buildSecurityEvent(payload reportXdpPayload) (string, string, bool) {
+	command := strings.ToLower(payload.Command)
+	data := strings.ToLower(payload.Data)
+
+	switch command {
+	case "report_license":
+		switch data {
+		case "expired":
+			return "License issue", "License has expired, please take action.", true
+		case "manipulated":
+			return "License issue", "License is manually manipulated, please take action.", true
+		default:
+			if payload.Data == "" {
+				return "", "", false
+			}
+			return "License issue", fmt.Sprintf("License issue reported: %s", payload.Data), true
+		}
+	case "report_attack":
+		switch data {
+		case "attack_start":
+			return "L4 DDOS Attack", "L4 DDOS Attack has started.", true
+		case "attack_stop":
+			return "L4 DDOS Attack", "L4 DDOS Attack has stopped.", true
+		default:
+			if payload.Data == "" {
+				return "", "", false
+			}
+			return "L4 DDOS Attack", fmt.Sprintf("L4 DDOS Attack report: %s", payload.Data), true
+		}
+	case "report_block_ip":
+		if payload.IP == "" {
+			return "", "", false
+		}
+		description := fmt.Sprintf("Multiple packets from IP %s is blocked", payload.IP)
+		if payload.TTL != "" {
+			description = fmt.Sprintf("%s for %s seconds", description, payload.TTL)
+		}
+		if payload.AttackType != "" {
+			description = fmt.Sprintf("%s due to %s attack", description, payload.AttackType)
+		}
+		return "DDos Attack Detected", description, true
+	case "report_protection":
+		if payload.Data == "" {
+			return "", "", false
+		}
+		return "Protection Mode", fmt.Sprintf("Protection event: %s", payload.Data), true
+	default:
+		return "", "", false
+	}
+}
+
+func buildBlacklistInput(serverName string, payload reportXdpPayload) store.BlacklistInput {
+	reason := "Reported by agent"
+	if payload.AttackType != "" {
+		reason = payload.AttackType
+	}
+	return store.BlacklistInput{
+		IPAddress:   payload.IP,
+		Reason:      reason,
+		Server:      serverName,
+		TTL:         payload.TTL,
+		TriggerRule: payload.AttackType,
+	}
 }
 
 type dashboardSummaryResponse struct {
