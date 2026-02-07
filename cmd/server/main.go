@@ -29,8 +29,8 @@ func main() {
 	}()
 
 	userStore := store.NewUserStore(connection)
-	serverStore := store.NewServerStore(connection)
 	l4Store := store.NewL4Store(connection)
+	serverStore := store.NewServerStore(connection)
 	l4LiveAttackStore := store.NewL4LiveAttackStore(connection)
 	l4AttackStatsStore := store.NewL4AttackStatsStore(connection)
 	securityEventStore := store.NewSecurityEventStore(connection)
