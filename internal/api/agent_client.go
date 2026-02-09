@@ -84,6 +84,11 @@ type agentL4Payload struct {
 	store.L4Config
 }
 
+type agentL4AddWhiteIPPayload struct {
+	Token string `json:"token"`
+	IP    string `json:"ip"`
+}
+
 type L4Options struct {
 	Interfaces             []string            `json:"interfaces"`
 	AttachModes            []string            `json:"attachModes"`
@@ -192,4 +197,293 @@ func (client *AgentClient) FetchL4Options(ctx context.Context, serverIP string, 
 	}
 
 	return options, nil
+}
+
+func (client *AgentClient) AddL4WhitelistIP(ctx context.Context, serverIP string, token string, ip string) error {
+	serverIP = strings.TrimSpace(serverIP)
+	if serverIP == "" {
+		return fmt.Errorf("server IP is empty")
+	}
+
+	payloadToken := strings.TrimSpace(token)
+	if payloadToken == "" {
+		payloadToken = strings.TrimSpace(client.token)
+	}
+
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return fmt.Errorf("ip is empty")
+	}
+
+	body, err := json.Marshal(agentL4AddWhiteIPPayload{
+		Token: payloadToken,
+		IP:    ip,
+	})
+	if err != nil {
+		return fmt.Errorf("encode payload: %w", err)
+	}
+
+	targetHost := serverIP
+	if client.port != "" {
+		targetHost = net.JoinHostPort(serverIP, client.port)
+	}
+
+	// Hard-coded path for add_white_ip, follows existing agent L4 API convention.
+	const addWhiteIPPath = "/API/L4/add_white_ip"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, client.scheme+"://"+targetHost+addWhiteIPPath, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if client.token != "" {
+		req.Header.Set("Authorization", "Bearer "+client.token)
+	}
+
+	resp, err := client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return AgentResponseError{
+			StatusCode: resp.StatusCode,
+			Body:       strings.TrimSpace(string(limited)),
+		}
+	}
+
+	return nil
+}
+
+func (client *AgentClient) AddL4BlacklistIP(ctx context.Context, serverIP string, token string, ip string) error {
+	serverIP = strings.TrimSpace(serverIP)
+	if serverIP == "" {
+		return fmt.Errorf("server IP is empty")
+	}
+	payloadToken := strings.TrimSpace(token)
+	if payloadToken == "" {
+		payloadToken = strings.TrimSpace(client.token)
+	}
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return fmt.Errorf("ip is empty")
+	}
+	body, err := json.Marshal(agentL4AddWhiteIPPayload{Token: payloadToken, IP: ip})
+	if err != nil {
+		return fmt.Errorf("encode payload: %w", err)
+	}
+	targetHost := serverIP
+	if client.port != "" {
+		targetHost = net.JoinHostPort(serverIP, client.port)
+	}
+	const addBlackIPPath = "/API/L4/add_block_ip"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, client.scheme+"://"+targetHost+addBlackIPPath, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if client.token != "" {
+		req.Header.Set("Authorization", "Bearer "+client.token)
+	}
+	resp, err := client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return AgentResponseError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(limited))}
+	}
+	return nil
+}
+
+func (client *AgentClient) RemoveL4BlacklistIP(ctx context.Context, serverIP string, token string, ip string) error {
+	serverIP = strings.TrimSpace(serverIP)
+	if serverIP == "" {
+		return fmt.Errorf("server IP is empty")
+	}
+	payloadToken := strings.TrimSpace(token)
+	if payloadToken == "" {
+		payloadToken = strings.TrimSpace(client.token)
+	}
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return fmt.Errorf("ip is empty")
+	}
+	body, err := json.Marshal(agentL4AddWhiteIPPayload{Token: payloadToken, IP: ip})
+	if err != nil {
+		return fmt.Errorf("encode payload: %w", err)
+	}
+	targetHost := serverIP
+	if client.port != "" {
+		targetHost = net.JoinHostPort(serverIP, client.port)
+	}
+	const removeBlackIPPath = "/API/L4/remove_block_ip"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, client.scheme+"://"+targetHost+removeBlackIPPath, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if client.token != "" {
+		req.Header.Set("Authorization", "Bearer "+client.token)
+	}
+	resp, err := client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return AgentResponseError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(limited))}
+	}
+	return nil
+}
+
+func (client *AgentClient) ClearL4Blacklist(ctx context.Context, serverIP string, token string) error {
+	serverIP = strings.TrimSpace(serverIP)
+	if serverIP == "" {
+		return fmt.Errorf("server IP is empty")
+	}
+	payloadToken := strings.TrimSpace(token)
+	if payloadToken == "" {
+		payloadToken = strings.TrimSpace(client.token)
+	}
+	body, err := json.Marshal(agentAuthPayload{Token: payloadToken})
+	if err != nil {
+		return fmt.Errorf("encode payload: %w", err)
+	}
+	targetHost := serverIP
+	if client.port != "" {
+		targetHost = net.JoinHostPort(serverIP, client.port)
+	}
+	const clearBlackIPPath = "/API/L4/remove_block_ip_all"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, client.scheme+"://"+targetHost+clearBlackIPPath, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if client.token != "" {
+		req.Header.Set("Authorization", "Bearer "+client.token)
+	}
+	resp, err := client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return AgentResponseError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(limited))}
+	}
+	return nil
+}
+
+func (client *AgentClient) RemoveL4WhitelistIP(ctx context.Context, serverIP string, token string, ip string) error {
+	serverIP = strings.TrimSpace(serverIP)
+	if serverIP == "" {
+		return fmt.Errorf("server IP is empty")
+	}
+
+	payloadToken := strings.TrimSpace(token)
+	if payloadToken == "" {
+		payloadToken = strings.TrimSpace(client.token)
+	}
+
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return fmt.Errorf("ip is empty")
+	}
+
+	body, err := json.Marshal(agentL4AddWhiteIPPayload{
+		Token: payloadToken,
+		IP:    ip,
+	})
+	if err != nil {
+		return fmt.Errorf("encode payload: %w", err)
+	}
+
+	targetHost := serverIP
+	if client.port != "" {
+		targetHost = net.JoinHostPort(serverIP, client.port)
+	}
+
+	const removeWhiteIPPath = "/API/L4/remove_white_ip"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, client.scheme+"://"+targetHost+removeWhiteIPPath, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if client.token != "" {
+		req.Header.Set("Authorization", "Bearer "+client.token)
+	}
+
+	resp, err := client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return AgentResponseError{
+			StatusCode: resp.StatusCode,
+			Body:       strings.TrimSpace(string(limited)),
+		}
+	}
+
+	return nil
+}
+
+func (client *AgentClient) ClearL4Whitelist(ctx context.Context, serverIP string, token string) error {
+	serverIP = strings.TrimSpace(serverIP)
+	if serverIP == "" {
+		return fmt.Errorf("server IP is empty")
+	}
+
+	payloadToken := strings.TrimSpace(token)
+	if payloadToken == "" {
+		payloadToken = strings.TrimSpace(client.token)
+	}
+
+	body, err := json.Marshal(agentAuthPayload{Token: payloadToken})
+	if err != nil {
+		return fmt.Errorf("encode payload: %w", err)
+	}
+
+	targetHost := serverIP
+	if client.port != "" {
+		targetHost = net.JoinHostPort(serverIP, client.port)
+	}
+
+	const clearWhiteIPPath = "/API/L4/remove_white_ip_all"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, client.scheme+"://"+targetHost+clearWhiteIPPath, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if client.token != "" {
+		req.Header.Set("Authorization", "Bearer "+client.token)
+	}
+
+	resp, err := client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return AgentResponseError{
+			StatusCode: resp.StatusCode,
+			Body:       strings.TrimSpace(string(limited)),
+		}
+	}
+
+	return nil
 }

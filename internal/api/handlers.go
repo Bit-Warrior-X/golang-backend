@@ -2130,6 +2130,105 @@ func serverDetailHandler(
 			return
 		}
 
+		if strings.HasSuffix(r.URL.Path, "/l4/blacklist/clear") && r.Method == http.MethodPost {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/l4/blacklist/clear")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if agentClient == nil {
+				writeError(w, http.StatusInternalServerError, "agent client not configured")
+				return
+			}
+			server, err := servers.GetView(r.Context(), serverID)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "server not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to load server data")
+				return
+			}
+			if err := agentClient.ClearL4Blacklist(r.Context(), server.IP, server.Token); err != nil {
+				var agentErr AgentResponseError
+				if errors.As(err, &agentErr) {
+					writeError(w, http.StatusBadGateway, agentErr.Error())
+					return
+				}
+				writeError(w, http.StatusBadGateway, "failed to clear l4 blacklist on server agent")
+				return
+			}
+			if err := l4Blacklist.DeleteAll(r.Context(), serverID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to flush l4 blacklist entries")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		if strings.Contains(r.URL.Path, "/l4/blacklist/remove/") && r.Method == http.MethodPost {
+			trimmed := strings.TrimPrefix(r.URL.Path, "/servers/")
+			parts := strings.Split(trimmed, "/")
+			if len(parts) != 5 || parts[1] != "l4" || parts[2] != "blacklist" || parts[3] != "remove" {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			serverID, ok := parsePositiveInt(parts[0])
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			entryID, ok := parsePositiveInt(parts[4])
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if agentClient == nil {
+				writeError(w, http.StatusInternalServerError, "agent client not configured")
+				return
+			}
+			entries, err := l4Blacklist.ListByServer(r.Context(), serverID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load l4 blacklist entries")
+				return
+			}
+			var ipToRemove string
+			for _, e := range entries {
+				if e.ID == entryID {
+					ipToRemove = strings.TrimSpace(e.IPAddress)
+					break
+				}
+			}
+			if ipToRemove == "" {
+				writeError(w, http.StatusNotFound, "l4 blacklist entry not found")
+				return
+			}
+			server, err := servers.GetView(r.Context(), serverID)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "server not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to load server data")
+				return
+			}
+			if err := agentClient.RemoveL4BlacklistIP(r.Context(), server.IP, server.Token, ipToRemove); err != nil {
+				var agentErr AgentResponseError
+				if errors.As(err, &agentErr) {
+					writeError(w, http.StatusBadGateway, agentErr.Error())
+					return
+				}
+				writeError(w, http.StatusBadGateway, "failed to remove l4 blacklist ip from server agent")
+				return
+			}
+			if err := l4Blacklist.Delete(r.Context(), serverID, entryID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to delete l4 blacklist entry")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
 		if strings.Contains(r.URL.Path, "/l4/blacklist") {
 			serverID, entryID, ok := parseL4BlacklistPath(r.URL.Path)
 			if !ok {
@@ -2154,6 +2253,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusNotFound, "not found")
 					return
 				}
+				if agentClient == nil {
+					writeError(w, http.StatusInternalServerError, "agent client not configured")
+					return
+				}
 				var payload l4BlacklistPayload
 				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 					writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -2168,6 +2271,24 @@ func serverDetailHandler(
 				if reason == "" {
 					reason = "Manual block"
 				}
+				server, err := servers.GetView(r.Context(), serverID)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to load server data")
+					return
+				}
+				if err := agentClient.AddL4BlacklistIP(r.Context(), server.IP, server.Token, ipAddress); err != nil {
+					var agentErr AgentResponseError
+					if errors.As(err, &agentErr) {
+						writeError(w, http.StatusBadGateway, agentErr.Error())
+						return
+					}
+					writeError(w, http.StatusBadGateway, "failed to apply l4 blacklist ip to server agent")
+					return
+				}
 				created, err := l4Blacklist.Create(r.Context(), serverID, store.L4BlacklistInput{
 					IPAddress: ipAddress,
 					Reason:    reason,
@@ -2181,23 +2302,108 @@ func serverDetailHandler(
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
-			case http.MethodDelete:
-				if entryID == 0 {
-					if err := l4Blacklist.DeleteAll(r.Context(), serverID); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to flush l4 blacklist entries")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				if err := l4Blacklist.Delete(r.Context(), serverID, entryID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete l4 blacklist entry")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
 			default:
 				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			}
+			return
+		}
+
+		if strings.HasSuffix(r.URL.Path, "/l4/whitelist/clear") && r.Method == http.MethodPost {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/l4/whitelist/clear")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if agentClient == nil {
+				writeError(w, http.StatusInternalServerError, "agent client not configured")
+				return
+			}
+			server, err := servers.GetView(r.Context(), serverID)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "server not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to load server data")
+				return
+			}
+			if err := agentClient.ClearL4Whitelist(r.Context(), server.IP, server.Token); err != nil {
+				var agentErr AgentResponseError
+				if errors.As(err, &agentErr) {
+					writeError(w, http.StatusBadGateway, agentErr.Error())
+					return
+				}
+				writeError(w, http.StatusBadGateway, "failed to clear l4 whitelist on server agent")
+				return
+			}
+			if err := l4Whitelist.DeleteAll(r.Context(), serverID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to clear l4 whitelist entries")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		if strings.Contains(r.URL.Path, "/l4/whitelist/remove/") && r.Method == http.MethodPost {
+			trimmed := strings.TrimPrefix(r.URL.Path, "/servers/")
+			parts := strings.Split(trimmed, "/")
+			if len(parts) != 5 || parts[1] != "l4" || parts[2] != "whitelist" || parts[3] != "remove" {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			serverID, ok := parsePositiveInt(parts[0])
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			entryID, ok := parsePositiveInt(parts[4])
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if agentClient == nil {
+				writeError(w, http.StatusInternalServerError, "agent client not configured")
+				return
+			}
+			entries, err := l4Whitelist.ListByServer(r.Context(), serverID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load l4 whitelist entries")
+				return
+			}
+			var ipToRemove string
+			for _, e := range entries {
+				if e.ID == entryID {
+					ipToRemove = strings.TrimSpace(e.IPAddress)
+					break
+				}
+			}
+			if ipToRemove == "" {
+				writeError(w, http.StatusNotFound, "l4 whitelist entry not found")
+				return
+			}
+			server, err := servers.GetView(r.Context(), serverID)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "server not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to load server data")
+				return
+			}
+			if err := agentClient.RemoveL4WhitelistIP(r.Context(), server.IP, server.Token, ipToRemove); err != nil {
+				var agentErr AgentResponseError
+				if errors.As(err, &agentErr) {
+					writeError(w, http.StatusBadGateway, agentErr.Error())
+					return
+				}
+				writeError(w, http.StatusBadGateway, "failed to remove l4 whitelist ip from server agent")
+				return
+			}
+			if err := l4Whitelist.Delete(r.Context(), serverID, entryID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to delete l4 whitelist entry")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
@@ -2225,6 +2431,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusNotFound, "not found")
 					return
 				}
+				if agentClient == nil {
+					writeError(w, http.StatusInternalServerError, "agent client not configured")
+					return
+				}
 				var payload l4WhitelistPayload
 				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 					writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -2238,6 +2448,24 @@ func serverDetailHandler(
 				reason := strings.TrimSpace(payload.Reason)
 				if reason == "" {
 					reason = "Manual whitelist"
+				}
+				server, err := servers.GetView(r.Context(), serverID)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to load server data")
+					return
+				}
+				if err := agentClient.AddL4WhitelistIP(r.Context(), server.IP, server.Token, ipAddress); err != nil {
+					var agentErr AgentResponseError
+					if errors.As(err, &agentErr) {
+						writeError(w, http.StatusBadGateway, agentErr.Error())
+						return
+					}
+					writeError(w, http.StatusBadGateway, "failed to apply l4 whitelist ip to server agent")
+					return
 				}
 				created, err := l4Whitelist.Create(r.Context(), serverID, store.L4WhitelistInput{
 					IPAddress: ipAddress,
@@ -2254,11 +2482,71 @@ func serverDetailHandler(
 				writeJSON(w, http.StatusCreated, created)
 			case http.MethodDelete:
 				if entryID == 0 {
+					if agentClient == nil {
+						writeError(w, http.StatusInternalServerError, "agent client not configured")
+						return
+					}
+					server, err := servers.GetView(r.Context(), serverID)
+					if err != nil {
+						if store.IsNotFound(err) {
+							writeError(w, http.StatusNotFound, "server not found")
+							return
+						}
+						writeError(w, http.StatusInternalServerError, "failed to load server data")
+						return
+					}
+					if err := agentClient.ClearL4Whitelist(r.Context(), server.IP, server.Token); err != nil {
+						var agentErr AgentResponseError
+						if errors.As(err, &agentErr) {
+							writeError(w, http.StatusBadGateway, agentErr.Error())
+							return
+						}
+						writeError(w, http.StatusBadGateway, "failed to clear l4 whitelist on server agent")
+						return
+					}
 					if err := l4Whitelist.DeleteAll(r.Context(), serverID); err != nil {
 						writeError(w, http.StatusInternalServerError, "failed to clear l4 whitelist entries")
 						return
 					}
 					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				if agentClient == nil {
+					writeError(w, http.StatusInternalServerError, "agent client not configured")
+					return
+				}
+				entries, err := l4Whitelist.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load l4 whitelist entries")
+					return
+				}
+				var ipToRemove string
+				for _, e := range entries {
+					if e.ID == entryID {
+						ipToRemove = strings.TrimSpace(e.IPAddress)
+						break
+					}
+				}
+				if ipToRemove == "" {
+					writeError(w, http.StatusNotFound, "l4 whitelist entry not found")
+					return
+				}
+				server, err := servers.GetView(r.Context(), serverID)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to load server data")
+					return
+				}
+				if err := agentClient.RemoveL4WhitelistIP(r.Context(), server.IP, server.Token, ipToRemove); err != nil {
+					var agentErr AgentResponseError
+					if errors.As(err, &agentErr) {
+						writeError(w, http.StatusBadGateway, agentErr.Error())
+						return
+					}
+					writeError(w, http.StatusBadGateway, "failed to remove l4 whitelist ip from server agent")
 					return
 				}
 				if err := l4Whitelist.Delete(r.Context(), serverID, entryID); err != nil {
