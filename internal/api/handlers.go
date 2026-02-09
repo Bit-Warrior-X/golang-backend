@@ -41,6 +41,8 @@ func registerRoutes(
 	users store.UserStore,
 	servers store.ServerStore,
 	l4 store.L4Store,
+	l4Whitelist store.L4WhitelistStore,
+	l4Blacklist store.L4BlacklistStore,
 	l4LiveAttack store.L4LiveAttackStore,
 	l4AttackStats store.L4AttackStatsStore,
 	securityEvents store.SecurityEventStore,
@@ -132,7 +134,7 @@ func registerRoutes(
 	mux.HandleFunc("/servers", serversHandler(servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
 	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(blacklist))
-	mux.HandleFunc("/servers/", serverDetailHandler(agentClient, servers, l4, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers))
+	mux.HandleFunc("/servers/", serverDetailHandler(agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -1850,6 +1852,16 @@ type serverBlacklistPayload struct {
 	TriggerRule string `json:"triggerRule"`
 }
 
+type l4BlacklistPayload struct {
+	IPAddress string `json:"ipAddress"`
+	Reason    string `json:"reason"`
+}
+
+type l4WhitelistPayload struct {
+	IPAddress string `json:"ipAddress"`
+	Reason    string `json:"reason"`
+}
+
 func serverBlacklistHandler(blacklist store.BlacklistStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/servers/blacklist")
@@ -1968,6 +1980,8 @@ func serverDetailHandler(
 	agentClient *AgentClient,
 	servers store.ServerStore,
 	l4 store.L4Store,
+	l4Whitelist store.L4WhitelistStore,
+	l4Blacklist store.L4BlacklistStore,
 	wafWhitelist store.WafWhitelistStore,
 	wafBlacklist store.WafBlacklistStore,
 	wafGeo store.WafGeoStore,
@@ -2110,6 +2124,148 @@ func serverDetailHandler(
 					return
 				}
 				writeJSON(w, http.StatusOK, updated)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
+		if strings.Contains(r.URL.Path, "/l4/blacklist") {
+			serverID, entryID, ok := parseL4BlacklistPath(r.URL.Path)
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+
+			switch r.Method {
+			case http.MethodGet:
+				if entryID != 0 {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := l4Blacklist.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load l4 blacklist entries")
+					return
+				}
+				writeJSON(w, http.StatusOK, list)
+			case http.MethodPost:
+				if entryID != 0 {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				var payload l4BlacklistPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				ipAddress := strings.TrimSpace(payload.IPAddress)
+				if ipAddress == "" {
+					writeError(w, http.StatusBadRequest, "ipAddress is required")
+					return
+				}
+				reason := strings.TrimSpace(payload.Reason)
+				if reason == "" {
+					reason = "Manual block"
+				}
+				created, err := l4Blacklist.Create(r.Context(), serverID, store.L4BlacklistInput{
+					IPAddress: ipAddress,
+					Reason:    reason,
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to create l4 blacklist entry")
+					return
+				}
+				writeJSON(w, http.StatusCreated, created)
+			case http.MethodDelete:
+				if entryID == 0 {
+					if err := l4Blacklist.DeleteAll(r.Context(), serverID); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to flush l4 blacklist entries")
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				if err := l4Blacklist.Delete(r.Context(), serverID, entryID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete l4 blacklist entry")
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
+		if strings.Contains(r.URL.Path, "/l4/whitelist") {
+			serverID, entryID, ok := parseL4WhitelistPath(r.URL.Path)
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+
+			switch r.Method {
+			case http.MethodGet:
+				if entryID != 0 {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := l4Whitelist.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load l4 whitelist entries")
+					return
+				}
+				writeJSON(w, http.StatusOK, list)
+			case http.MethodPost:
+				if entryID != 0 {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				var payload l4WhitelistPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				ipAddress := strings.TrimSpace(payload.IPAddress)
+				if ipAddress == "" {
+					writeError(w, http.StatusBadRequest, "ipAddress is required")
+					return
+				}
+				reason := strings.TrimSpace(payload.Reason)
+				if reason == "" {
+					reason = "Manual whitelist"
+				}
+				created, err := l4Whitelist.Create(r.Context(), serverID, store.L4WhitelistInput{
+					IPAddress: ipAddress,
+					Reason:    reason,
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to create l4 whitelist entry")
+					return
+				}
+				writeJSON(w, http.StatusCreated, created)
+			case http.MethodDelete:
+				if entryID == 0 {
+					if err := l4Whitelist.DeleteAll(r.Context(), serverID); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to clear l4 whitelist entries")
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				if err := l4Whitelist.Delete(r.Context(), serverID, entryID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete l4 whitelist entry")
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
 			default:
 				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			}
@@ -3149,6 +3305,58 @@ func parseWafWhitelistPath(path string) (serverID int64, ruleID int64, isBatch b
 		return serverID, ruleID, false, true
 	}
 	return 0, 0, false, false
+}
+
+func parseL4BlacklistPath(path string) (serverID int64, entryID int64, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/servers/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 3 {
+		return 0, 0, false
+	}
+	if parts[1] != "l4" || parts[2] != "blacklist" {
+		return 0, 0, false
+	}
+	serverID, ok = parsePositiveInt(parts[0])
+	if !ok {
+		return 0, 0, false
+	}
+	if len(parts) == 3 {
+		return serverID, 0, true
+	}
+	if len(parts) == 4 {
+		entryID, ok = parsePositiveInt(parts[3])
+		if !ok {
+			return 0, 0, false
+		}
+		return serverID, entryID, true
+	}
+	return 0, 0, false
+}
+
+func parseL4WhitelistPath(path string) (serverID int64, entryID int64, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/servers/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 3 {
+		return 0, 0, false
+	}
+	if parts[1] != "l4" || parts[2] != "whitelist" {
+		return 0, 0, false
+	}
+	serverID, ok = parsePositiveInt(parts[0])
+	if !ok {
+		return 0, 0, false
+	}
+	if len(parts) == 3 {
+		return serverID, 0, true
+	}
+	if len(parts) == 4 {
+		entryID, ok = parsePositiveInt(parts[3])
+		if !ok {
+			return 0, 0, false
+		}
+		return serverID, entryID, true
+	}
+	return 0, 0, false
 }
 
 func parseWafBlacklistPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
