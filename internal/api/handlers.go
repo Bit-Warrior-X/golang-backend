@@ -62,8 +62,8 @@ func registerRoutes(
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
-	mux.HandleFunc("/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack))
-	mux.HandleFunc("/api/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack))
+	mux.HandleFunc("/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
+	mux.HandleFunc("/api/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
 	mux.HandleFunc("/dashboard/summary", dashboardSummaryHandler(users, servers, blacklist, l4LiveAttack, serverTrafficStats))
 	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, blacklist, l4LiveAttack, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
@@ -131,6 +131,10 @@ func registerRoutes(
 	mux.HandleFunc("/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats))
 	mux.HandleFunc("/api/v1/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats))
 	mux.HandleFunc("/auth/login", loginHandler(users))
+	mux.HandleFunc("/api/get_blocklist_ips", getBlocklistIPsHandler(servers, l4Blacklist))
+	mux.HandleFunc("/api/v1/get_blocklist_ips", getBlocklistIPsHandler(servers, l4Blacklist))
+	mux.HandleFunc("/api/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
+	mux.HandleFunc("/api/v1/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
 	mux.HandleFunc("/servers", serversHandler(servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
 	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(blacklist))
@@ -167,7 +171,141 @@ type reportXdpPayload struct {
 	AttackType string `json:"attack_type"`
 }
 
-func reportXdpHandler(securityEvents store.SecurityEventStore, servers store.ServerStore, blacklist store.BlacklistStore, l4LiveAttack store.L4LiveAttackStore) http.HandlerFunc {
+// getBlocklistIPsPayload is the request shape for /api/get_blocklist_ips.
+// It reuses the same authentication model as /report_xdp: identify server by token.
+type getBlocklistIPsPayload struct {
+	Token string `json:"token"`
+}
+
+// getBlocklistIPsHandler exposes a simple API endpoint that returns L4 blacklist
+// IPs for the server identified by the provided token. The response is an array
+// of objects with fields: ip, reason, created_at.
+// Accepts GET with ?token=... or POST with JSON body {"token": "..."}.
+func getBlocklistIPsHandler(servers store.ServerStore, l4Blacklist store.L4BlacklistStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var token string
+		switch r.Method {
+		case http.MethodGet:
+			token = strings.TrimSpace(r.URL.Query().Get("token"))
+		case http.MethodPost:
+			var payload getBlocklistIPsPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			token = strings.TrimSpace(payload.Token)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if token == "" {
+			writeError(w, http.StatusForbidden, "missing token")
+			return
+		}
+
+		server, err := servers.GetByToken(r.Context(), token)
+		if err != nil {
+			if store.IsNotFound(err) {
+				writeError(w, http.StatusForbidden, "invalid token")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to validate token")
+			return
+		}
+
+		entries, err := l4Blacklist.ListByServer(r.Context(), server.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load l4 blacklist entries")
+			return
+		}
+
+		type blocklistIP struct {
+			IP        string `json:"ip"`
+			Reason    string `json:"reason"`
+			CreatedAt string `json:"created_at"`
+		}
+
+		result := make([]blocklistIP, 0, len(entries))
+		for _, e := range entries {
+			result = append(result, blocklistIP{
+				IP:        strings.TrimSpace(e.IPAddress),
+				Reason:    strings.TrimSpace(e.Reason),
+				CreatedAt: e.CreatedAt,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+// getWhitelistIPsHandler exposes a simple API endpoint that returns L4 whitelist
+// IPs for the server identified by the provided token. The response is an array
+// of objects with fields: ip, reason, created_at.
+// Accepts GET with ?token=... or POST with JSON body {"token": "..."}.
+func getWhitelistIPsHandler(servers store.ServerStore, l4Whitelist store.L4WhitelistStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var token string
+		switch r.Method {
+		case http.MethodGet:
+			token = strings.TrimSpace(r.URL.Query().Get("token"))
+		case http.MethodPost:
+			var payload getBlocklistIPsPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			token = strings.TrimSpace(payload.Token)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if token == "" {
+			writeError(w, http.StatusForbidden, "missing token")
+			return
+		}
+
+		server, err := servers.GetByToken(r.Context(), token)
+		if err != nil {
+			if store.IsNotFound(err) {
+				writeError(w, http.StatusForbidden, "invalid token")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to validate token")
+			return
+		}
+
+		entries, err := l4Whitelist.ListByServer(r.Context(), server.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load l4 whitelist entries")
+			return
+		}
+
+		type whitelistIP struct {
+			IP        string `json:"ip"`
+			Reason    string `json:"reason"`
+			CreatedAt string `json:"created_at"`
+		}
+
+		result := make([]whitelistIP, 0, len(entries))
+		for _, e := range entries {
+			result = append(result, whitelistIP{
+				IP:        strings.TrimSpace(e.IPAddress),
+				Reason:    strings.TrimSpace(e.Reason),
+				CreatedAt: e.CreatedAt,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+func reportXdpHandler(
+	securityEvents store.SecurityEventStore,
+	servers store.ServerStore,
+	blacklist store.BlacklistStore,
+	l4LiveAttack store.L4LiveAttackStore,
+	l4Blacklist store.L4BlacklistStore,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
