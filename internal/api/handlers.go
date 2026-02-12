@@ -2237,6 +2237,80 @@ func callL7UpdateBlacklist(ctx context.Context, servers store.ServerStore, serve
 	return nil
 }
 
+// l7GeoUpdatePayload is sent to api_parser's /api/l7_update_geo endpoint to
+// keep the L7 (WAF) geolocation rules for a server in sync.
+type l7GeoUpdatePayload struct {
+	ServerID int64              `json:"serverId"`
+	ServerIP string             `json:"serverIp"`
+	Rules    []store.WafGeoRule `json:"rules"`
+}
+
+// l7GeoUpdateURL is the api_parser endpoint that receives full L7 GEO data
+// whenever rules change.
+const l7GeoUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_geo"
+
+// callL7UpdateGeo loads all WAF GEO rules for the given server, filters to
+// enabled ones only, normalizes behavior for WHITE operation, and sends them
+// to api_parser via the l7_update_geo API using POST.
+func callL7UpdateGeo(ctx context.Context, servers store.ServerStore, serverID int64, wafGeo store.WafGeoStore) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	allRules, err := wafGeo.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load waf geo rules: %w", err)
+	}
+
+	// Filter to enabled rules and enforce behavior=Allow for WHITE operation.
+	normalized := make([]store.WafGeoRule, 0, len(allRules))
+	for _, r := range allRules {
+		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
+			continue
+		}
+		rule := r
+		if strings.EqualFold(strings.TrimSpace(rule.Operation), "WHITE") {
+			rule.Behavior = "Allow"
+		}
+		normalized = append(normalized, rule)
+	}
+
+	payload := l7GeoUpdatePayload{
+		ServerID: server.ID,
+		ServerIP: strings.TrimSpace(server.IP),
+		Rules:    normalized,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 geo payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7GeoUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_geo request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_geo request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_geo returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
 func serverDetailHandler(
 	agentClient *AgentClient,
 	servers store.ServerStore,
@@ -3073,6 +3147,10 @@ func serverDetailHandler(
 						writeError(w, http.StatusInternalServerError, "failed to delete rules")
 						return
 					}
+					if err := callL7UpdateGeo(r.Context(), servers, serverID, wafGeo); err != nil {
+						writeError(w, http.StatusBadGateway, "failed to sync waf geo rules")
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
@@ -3094,6 +3172,10 @@ func serverDetailHandler(
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to create geo rule")
+					return
+				}
+				if err := callL7UpdateGeo(r.Context(), servers, serverID, wafGeo); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf geo rules")
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
@@ -3122,6 +3204,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to update geo rule")
 					return
 				}
+				if err := callL7UpdateGeo(r.Context(), servers, serverID, wafGeo); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf geo rules")
+					return
+				}
 				writeJSON(w, http.StatusOK, updated)
 			case http.MethodDelete:
 				if ruleID == 0 || isBatch {
@@ -3130,6 +3216,10 @@ func serverDetailHandler(
 				}
 				if err := wafGeo.Delete(r.Context(), serverID, ruleID); err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to delete geo rule")
+					return
+				}
+				if err := callL7UpdateGeo(r.Context(), servers, serverID, wafGeo); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf geo rules")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
