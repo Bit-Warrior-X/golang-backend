@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -2114,6 +2117,126 @@ func serverBlacklistHandler(blacklist store.BlacklistStore) http.HandlerFunc {
 	}
 }
 
+// l7WhitelistUpdatePayload is sent to api_parser's /api/l7_update_whitelist
+// endpoint to keep the L7 (WAF) whitelist rules for a server in sync.
+type l7WhitelistUpdatePayload struct {
+	ServerID int64                    `json:"serverId"`
+	ServerIP string                   `json:"serverIp"`
+	Rules    []store.WafWhitelistRule `json:"rules"`
+}
+
+// l7WhitelistUpdateURL is the api_parser endpoint that receives full L7
+// whitelist data whenever rules change.
+const l7WhitelistUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_whitelist"
+
+// callL7UpdateWhitelist loads all WAF whitelist rules for the given server and
+// sends them to api_parser via the l7_update_whitelist API using POST.
+func callL7UpdateWhitelist(ctx context.Context, servers store.ServerStore, serverID int64, wafWhitelist store.WafWhitelistStore) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	rules, err := wafWhitelist.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load waf whitelist rules: %w", err)
+	}
+
+	payload := l7WhitelistUpdatePayload{
+		ServerID: server.ID,
+		ServerIP: strings.TrimSpace(server.IP),
+		Rules:    rules,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 whitelist payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7WhitelistUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_whitelist request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_whitelist request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_whitelist returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
+// l7BlacklistUpdatePayload is sent to api_parser's /api/l7_update_blacklist
+// endpoint to keep the L7 (WAF) blacklist rules for a server in sync.
+type l7BlacklistUpdatePayload struct {
+	ServerID int64                    `json:"serverId"`
+	ServerIP string                   `json:"serverIp"`
+	Rules    []store.WafBlacklistRule `json:"rules"`
+}
+
+// l7BlacklistUpdateURL is the api_parser endpoint that receives full L7
+// blacklist data whenever rules change.
+const l7BlacklistUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_blacklist"
+
+// callL7UpdateBlacklist loads all WAF blacklist rules for the given server and
+// sends them to api_parser via the l7_update_blacklist API using POST.
+func callL7UpdateBlacklist(ctx context.Context, servers store.ServerStore, serverID int64, wafBlacklist store.WafBlacklistStore) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	rules, err := wafBlacklist.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load waf blacklist rules: %w", err)
+	}
+
+	payload := l7BlacklistUpdatePayload{
+		ServerID: server.ID,
+		ServerIP: strings.TrimSpace(server.IP),
+		Rules:    rules,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 blacklist payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7BlacklistUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_blacklist request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_blacklist request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_blacklist returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
 func serverDetailHandler(
 	agentClient *AgentClient,
 	servers store.ServerStore,
@@ -2728,6 +2851,10 @@ func serverDetailHandler(
 						writeError(w, http.StatusInternalServerError, "failed to delete rules")
 						return
 					}
+					if err := callL7UpdateWhitelist(r.Context(), servers, serverID, wafWhitelist); err != nil {
+						writeError(w, http.StatusBadGateway, "failed to sync waf whitelist rules")
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
@@ -2748,6 +2875,10 @@ func serverDetailHandler(
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to create whitelist rule")
+					return
+				}
+				if err := callL7UpdateWhitelist(r.Context(), servers, serverID, wafWhitelist); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf whitelist rules")
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
@@ -2775,6 +2906,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to update whitelist rule")
 					return
 				}
+				if err := callL7UpdateWhitelist(r.Context(), servers, serverID, wafWhitelist); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf whitelist rules")
+					return
+				}
 				writeJSON(w, http.StatusOK, updated)
 			case http.MethodDelete:
 				if ruleID == 0 || isBatch {
@@ -2783,6 +2918,10 @@ func serverDetailHandler(
 				}
 				if err := wafWhitelist.Delete(r.Context(), serverID, ruleID); err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to delete whitelist rule")
+					return
+				}
+				if err := callL7UpdateWhitelist(r.Context(), servers, serverID, wafWhitelist); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf whitelist rules")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
@@ -2822,6 +2961,10 @@ func serverDetailHandler(
 						writeError(w, http.StatusInternalServerError, "failed to delete rules")
 						return
 					}
+					if err := callL7UpdateBlacklist(r.Context(), servers, serverID, wafBlacklist); err != nil {
+						writeError(w, http.StatusBadGateway, "failed to sync waf blacklist rules")
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
@@ -2843,6 +2986,10 @@ func serverDetailHandler(
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to create blacklist rule")
+					return
+				}
+				if err := callL7UpdateBlacklist(r.Context(), servers, serverID, wafBlacklist); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf blacklist rules")
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
@@ -2871,6 +3018,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to update blacklist rule")
 					return
 				}
+				if err := callL7UpdateBlacklist(r.Context(), servers, serverID, wafBlacklist); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf blacklist rules")
+					return
+				}
 				writeJSON(w, http.StatusOK, updated)
 			case http.MethodDelete:
 				if ruleID == 0 || isBatch {
@@ -2879,6 +3030,10 @@ func serverDetailHandler(
 				}
 				if err := wafBlacklist.Delete(r.Context(), serverID, ruleID); err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to delete blacklist rule")
+					return
+				}
+				if err := callL7UpdateBlacklist(r.Context(), servers, serverID, wafBlacklist); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf blacklist rules")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
