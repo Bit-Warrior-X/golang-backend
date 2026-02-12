@@ -2470,6 +2470,95 @@ func callL7UpdateIntervalFreqLimit(ctx context.Context, servers store.ServerStor
 	return nil
 }
 
+// l7SecondFreqLimitUpdatePayload is sent to api_parser's
+// /API/L7/l7_update_secondfreqlimit endpoint to keep the L7 (WAF)
+// second frequency limit rules for a server in sync.
+type l7SecondFreqLimitUpdatePayload struct {
+	ServerID int64                        `json:"serverId"`
+	ServerIP string                       `json:"serverIp"`
+	Rules    []secondFreqLimitRulePayload `json:"rules"`
+}
+
+// secondFreqLimitRulePayload is the per-rule shape expected by api_parser.
+type secondFreqLimitRulePayload struct {
+	ID           int64  `json:"id"`
+	ServerID     int64  `json:"serverId"`
+	URL          string `json:"url"`
+	RequestCount int    `json:"request_count"`
+	Burst        int    `json:"burst"`
+	Behavior     string `json:"behavior"`
+	Status       string `json:"status"`
+}
+
+// l7SecondFreqLimitUpdateURL is the api_parser endpoint that receives L7
+// second frequency limit data whenever rules change.
+const l7SecondFreqLimitUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_secondfreqlimit"
+
+// callL7UpdateSecondFreqLimit loads all WAF second frequency limit rules
+// for the given server, filters to enabled ones only, and sends them to
+// api_parser via the l7_update_secondfreqlimit API using POST.
+func callL7UpdateSecondFreqLimit(ctx context.Context, servers store.ServerStore, serverID int64, wafSecond store.WafSecondStore) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	allRules, err := wafSecond.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load waf second rules: %w", err)
+	}
+
+	enabled := make([]secondFreqLimitRulePayload, 0, len(allRules))
+	for _, r := range allRules {
+		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
+			continue
+		}
+		enabled = append(enabled, secondFreqLimitRulePayload{
+			ID:           r.ID,
+			ServerID:     r.ServerID,
+			URL:          r.URL,
+			RequestCount: r.RequestCount,
+			Burst:        r.Burst,
+			Behavior:     r.Behavior,
+			Status:       r.Status,
+		})
+	}
+
+	payload := l7SecondFreqLimitUpdatePayload{
+		ServerID: server.ID,
+		ServerIP: strings.TrimSpace(server.IP),
+		Rules:    enabled,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 secondfreqlimit payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7SecondFreqLimitUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_secondfreqlimit request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_secondfreqlimit request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_secondfreqlimit returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
 func serverDetailHandler(
 	agentClient *AgentClient,
 	servers store.ServerStore,
@@ -3743,6 +3832,10 @@ func serverDetailHandler(
 						writeError(w, http.StatusInternalServerError, "failed to delete rules")
 						return
 					}
+					if err := callL7UpdateSecondFreqLimit(r.Context(), servers, serverID, wafSecond); err != nil {
+						writeError(w, http.StatusBadGateway, "failed to sync waf second-freq-limit rules")
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
@@ -3764,6 +3857,10 @@ func serverDetailHandler(
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to create second freq rule")
+					return
+				}
+				if err := callL7UpdateSecondFreqLimit(r.Context(), servers, serverID, wafSecond); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf second-freq-limit rules")
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
@@ -3792,6 +3889,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to update second freq rule")
 					return
 				}
+				if err := callL7UpdateSecondFreqLimit(r.Context(), servers, serverID, wafSecond); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf second-freq-limit rules")
+					return
+				}
 				writeJSON(w, http.StatusOK, updated)
 			case http.MethodDelete:
 				if ruleID == 0 || isBatch {
@@ -3800,6 +3901,10 @@ func serverDetailHandler(
 				}
 				if err := wafSecond.Delete(r.Context(), serverID, ruleID); err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to delete second freq rule")
+					return
+				}
+				if err := callL7UpdateSecondFreqLimit(r.Context(), servers, serverID, wafSecond); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf second-freq-limit rules")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
