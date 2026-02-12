@@ -2381,6 +2381,95 @@ func callL7UpdateAntiHeader(ctx context.Context, servers store.ServerStore, serv
 	return nil
 }
 
+// l7IntervalFreqLimitUpdatePayload is sent to api_parser's
+// /API/L7/l7_update_intervalfreqlimit endpoint to keep the L7 (WAF)
+// interval frequency limit rules for a server in sync.
+type l7IntervalFreqLimitUpdatePayload struct {
+	ServerID int64                           `json:"serverId"`
+	ServerIP string                          `json:"serverIp"`
+	Rules    []intervalFreqLimitRulePayload  `json:"rules"`
+}
+
+// intervalFreqLimitRulePayload is the per-rule shape expected by api_parser.
+type intervalFreqLimitRulePayload struct {
+	ID           int64  `json:"id"`
+	ServerID     int64  `json:"serverId"`
+	URL          string `json:"url"`
+	TimeSeconds  int    `json:"time"`
+	RequestCount int    `json:"request_count"`
+	Behavior     string `json:"behavior"`
+	Status       string `json:"status"`
+}
+
+// l7IntervalFreqLimitUpdateURL is the api_parser endpoint that receives L7
+// interval frequency limit data whenever rules change.
+const l7IntervalFreqLimitUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_intervalfreqlimit"
+
+// callL7UpdateIntervalFreqLimit loads all WAF interval frequency limit rules
+// for the given server, filters to enabled ones only, and sends them to
+// api_parser via the l7_update_intervalfreqlimit API using POST.
+func callL7UpdateIntervalFreqLimit(ctx context.Context, servers store.ServerStore, serverID int64, wafInterval store.WafIntervalStore) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	allRules, err := wafInterval.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load waf interval rules: %w", err)
+	}
+
+	enabled := make([]intervalFreqLimitRulePayload, 0, len(allRules))
+	for _, r := range allRules {
+		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
+			continue
+		}
+		enabled = append(enabled, intervalFreqLimitRulePayload{
+			ID:           r.ID,
+			ServerID:     r.ServerID,
+			URL:          r.URL,
+			TimeSeconds:  r.TimeSeconds,
+			RequestCount: r.RequestCount,
+			Behavior:     r.Behavior,
+			Status:       r.Status,
+		})
+	}
+
+	payload := l7IntervalFreqLimitUpdatePayload{
+		ServerID: server.ID,
+		ServerIP: strings.TrimSpace(server.IP),
+		Rules:    enabled,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 intervalfreqlimit payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7IntervalFreqLimitUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_intervalfreqlimit request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_intervalfreqlimit request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_intervalfreqlimit returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
 func serverDetailHandler(
 	agentClient *AgentClient,
 	servers store.ServerStore,
@@ -3542,6 +3631,10 @@ func serverDetailHandler(
 						writeError(w, http.StatusInternalServerError, "failed to delete rules")
 						return
 					}
+					if err := callL7UpdateIntervalFreqLimit(r.Context(), servers, serverID, wafInterval); err != nil {
+						writeError(w, http.StatusBadGateway, "failed to sync waf interval-freq-limit rules")
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
@@ -3563,6 +3656,10 @@ func serverDetailHandler(
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to create interval rule")
+					return
+				}
+				if err := callL7UpdateIntervalFreqLimit(r.Context(), servers, serverID, wafInterval); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf interval-freq-limit rules")
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
@@ -3591,6 +3688,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to update interval rule")
 					return
 				}
+				if err := callL7UpdateIntervalFreqLimit(r.Context(), servers, serverID, wafInterval); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf interval-freq-limit rules")
+					return
+				}
 				writeJSON(w, http.StatusOK, updated)
 			case http.MethodDelete:
 				if ruleID == 0 || isBatch {
@@ -3599,6 +3700,10 @@ func serverDetailHandler(
 				}
 				if err := wafInterval.Delete(r.Context(), serverID, ruleID); err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to delete interval rule")
+					return
+				}
+				if err := callL7UpdateIntervalFreqLimit(r.Context(), servers, serverID, wafInterval); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf interval-freq-limit rules")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
