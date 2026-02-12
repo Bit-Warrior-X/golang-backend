@@ -2559,6 +2559,97 @@ func callL7UpdateSecondFreqLimit(ctx context.Context, servers store.ServerStore,
 	return nil
 }
 
+// l7ResponseFreqUpdatePayload is sent to api_parser's
+// /API/L7/l7_update_responsefreq endpoint to keep the L7 (WAF)
+// response frequency rules for a server in sync.
+type l7ResponseFreqUpdatePayload struct {
+	ServerID int64                      `json:"serverId"`
+	ServerIP string                     `json:"serverIp"`
+	Rules    []responseFreqRulePayload  `json:"rules"`
+}
+
+// responseFreqRulePayload is the per-rule shape expected by api_parser.
+type responseFreqRulePayload struct {
+	ID            int64  `json:"id"`
+	ServerID      int64  `json:"serverId"`
+	URL           string `json:"url"`
+	ResponseCode  string `json:"response_code"`
+	TimeSeconds   int    `json:"time"`
+	ResponseCount int    `json:"response_count"`
+	Behavior      string `json:"behavior"`
+	Status        string `json:"status"`
+}
+
+// l7ResponseFreqUpdateURL is the api_parser endpoint that receives L7
+// response frequency data whenever rules change.
+const l7ResponseFreqUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_responsefreq"
+
+// callL7UpdateResponseFreq loads all WAF response frequency rules for the
+// given server, filters to enabled ones only, and sends them to api_parser
+// via the l7_update_responsefreq API using POST.
+func callL7UpdateResponseFreq(ctx context.Context, servers store.ServerStore, serverID int64, wafResponse store.WafResponseStore) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	allRules, err := wafResponse.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load waf response freq rules: %w", err)
+	}
+
+	enabled := make([]responseFreqRulePayload, 0, len(allRules))
+	for _, r := range allRules {
+		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
+			continue
+		}
+		enabled = append(enabled, responseFreqRulePayload{
+			ID:            r.ID,
+			ServerID:      r.ServerID,
+			URL:           r.URL,
+			ResponseCode:  r.ResponseCode,
+			TimeSeconds:   r.TimeSeconds,
+			ResponseCount: r.ResponseCount,
+			Behavior:      r.Behavior,
+			Status:        r.Status,
+		})
+	}
+
+	payload := l7ResponseFreqUpdatePayload{
+		ServerID: server.ID,
+		ServerIP: strings.TrimSpace(server.IP),
+		Rules:    enabled,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 responsefreq payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7ResponseFreqUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_responsefreq request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_responsefreq request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_responsefreq returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
 func serverDetailHandler(
 	agentClient *AgentClient,
 	servers store.ServerStore,
@@ -3944,6 +4035,10 @@ func serverDetailHandler(
 						writeError(w, http.StatusInternalServerError, "failed to delete rules")
 						return
 					}
+					if err := callL7UpdateResponseFreq(r.Context(), servers, serverID, wafResponse); err != nil {
+						writeError(w, http.StatusBadGateway, "failed to sync waf response-freq rules")
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
@@ -3966,6 +4061,10 @@ func serverDetailHandler(
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to create response freq rule")
+					return
+				}
+				if err := callL7UpdateResponseFreq(r.Context(), servers, serverID, wafResponse); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf response-freq rules")
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
@@ -3995,6 +4094,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to update response freq rule")
 					return
 				}
+				if err := callL7UpdateResponseFreq(r.Context(), servers, serverID, wafResponse); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf response-freq rules")
+					return
+				}
 				writeJSON(w, http.StatusOK, updated)
 			case http.MethodDelete:
 				if ruleID == 0 || isBatch {
@@ -4003,6 +4106,10 @@ func serverDetailHandler(
 				}
 				if err := wafResponse.Delete(r.Context(), serverID, ruleID); err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to delete response freq rule")
+					return
+				}
+				if err := callL7UpdateResponseFreq(r.Context(), servers, serverID, wafResponse); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf response-freq rules")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
