@@ -2311,6 +2311,76 @@ func callL7UpdateGeo(ctx context.Context, servers store.ServerStore, serverID in
 	return nil
 }
 
+// l7AntiHeaderUpdatePayload is sent to api_parser's /API/L7/l7_update_antiheader
+// endpoint to keep the L7 (WAF) anti-header rules for a server in sync.
+type l7AntiHeaderUpdatePayload struct {
+	ServerID int64                      `json:"serverId"`
+	ServerIP string                     `json:"serverIp"`
+	Rules    []store.WafAntiHeaderRule  `json:"rules"`
+}
+
+// l7AntiHeaderUpdateURL is the api_parser endpoint that receives full L7
+// anti-header data whenever rules change.
+const l7AntiHeaderUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_antiheader"
+
+// callL7UpdateAntiHeader loads all WAF anti-header rules for the given server,
+// filters to enabled ones only, and sends them to api_parser via the
+// l7_update_antiheader API using POST.
+func callL7UpdateAntiHeader(ctx context.Context, servers store.ServerStore, serverID int64, wafAntiHeader store.WafAntiHeaderStore) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	allRules, err := wafAntiHeader.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load waf anti-header rules: %w", err)
+	}
+
+	// Only include rules whose status is ENABLE (case-insensitive).
+	enabled := make([]store.WafAntiHeaderRule, 0, len(allRules))
+	for _, r := range allRules {
+		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
+			continue
+		}
+		enabled = append(enabled, r)
+	}
+
+	payload := l7AntiHeaderUpdatePayload{
+		ServerID: server.ID,
+		ServerIP: strings.TrimSpace(server.IP),
+		Rules:    enabled,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 anti-header payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7AntiHeaderUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_antiheader request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_antiheader request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_antiheader returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
 func serverDetailHandler(
 	agentClient *AgentClient,
 	servers store.ServerStore,
@@ -3328,7 +3398,6 @@ func serverDetailHandler(
 			}
 			return
 		}
-
 		if strings.Contains(r.URL.Path, "/waf/anti-header") {
 			serverID, ruleID, isBatch, ok := parseWafAntiHeaderPath(r.URL.Path)
 			if !ok {
@@ -3359,6 +3428,10 @@ func serverDetailHandler(
 						writeError(w, http.StatusInternalServerError, "failed to delete rules")
 						return
 					}
+					if err := callL7UpdateAntiHeader(r.Context(), servers, serverID, wafAntiHeader); err != nil {
+						writeError(w, http.StatusBadGateway, "failed to sync waf anti-header rules")
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
@@ -3381,6 +3454,10 @@ func serverDetailHandler(
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to create anti-header rule")
+					return
+				}
+				if err := callL7UpdateAntiHeader(r.Context(), servers, serverID, wafAntiHeader); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf anti-header rules")
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
@@ -3410,6 +3487,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to update anti-header rule")
 					return
 				}
+				if err := callL7UpdateAntiHeader(r.Context(), servers, serverID, wafAntiHeader); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf anti-header rules")
+					return
+				}
 				writeJSON(w, http.StatusOK, updated)
 			case http.MethodDelete:
 				if ruleID == 0 || isBatch {
@@ -3418,6 +3499,10 @@ func serverDetailHandler(
 				}
 				if err := wafAntiHeader.Delete(r.Context(), serverID, ruleID); err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to delete anti-header rule")
+					return
+				}
+				if err := callL7UpdateAntiHeader(r.Context(), servers, serverID, wafAntiHeader); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf anti-header rules")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
