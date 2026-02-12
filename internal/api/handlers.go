@@ -2650,6 +2650,95 @@ func callL7UpdateResponseFreq(ctx context.Context, servers store.ServerStore, se
 	return nil
 }
 
+// l7UserAgentUpdatePayload is sent to api_parser's
+// /API/L7/l7_update_useragent endpoint to keep the L7 (WAF) user agent rules
+// for a server in sync.
+type l7UserAgentUpdatePayload struct {
+	ServerID int64                      `json:"serverId"`
+	ServerIP string                     `json:"serverIp"`
+	Rules    []userAgentRulePayload     `json:"rules"`
+}
+
+// userAgentRulePayload is the per-rule shape expected by api_parser.
+type userAgentRulePayload struct {
+	ID        int64  `json:"id"`
+	ServerID  int64  `json:"serverId"`
+	URL       string `json:"url"`
+	UserAgent string `json:"user_agent"`
+	Match     string `json:"match"`
+	Behavior  string `json:"behavior"`
+	Status    string `json:"status"`
+}
+
+// l7UserAgentUpdateURL is the api_parser endpoint that receives L7 user agent
+// data whenever rules change.
+const l7UserAgentUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_useragent"
+
+// callL7UpdateUserAgent loads all WAF user agent rules for the given server,
+// filters to enabled ones only, and sends them to api_parser via the
+// l7_update_useragent API using POST.
+func callL7UpdateUserAgent(ctx context.Context, servers store.ServerStore, serverID int64, wafUserAgent store.WafUserAgentStore) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	allRules, err := wafUserAgent.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load waf user agent rules: %w", err)
+	}
+
+	enabled := make([]userAgentRulePayload, 0, len(allRules))
+	for _, r := range allRules {
+		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
+			continue
+		}
+		enabled = append(enabled, userAgentRulePayload{
+			ID:        r.ID,
+			ServerID:  r.ServerID,
+			URL:       r.URL,
+			UserAgent: r.UserAgent,
+			Match:     r.Match,
+			Behavior:  r.Behavior,
+			Status:    r.Status,
+		})
+	}
+
+	payload := l7UserAgentUpdatePayload{
+		ServerID: server.ID,
+		ServerIP: strings.TrimSpace(server.IP),
+		Rules:    enabled,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 useragent payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7UserAgentUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_useragent request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_useragent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_useragent returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
 func serverDetailHandler(
 	agentClient *AgentClient,
 	servers store.ServerStore,
@@ -4149,6 +4238,10 @@ func serverDetailHandler(
 						writeError(w, http.StatusInternalServerError, "failed to delete rules")
 						return
 					}
+					if err := callL7UpdateUserAgent(r.Context(), servers, serverID, wafUserAgent); err != nil {
+						writeError(w, http.StatusBadGateway, "failed to sync waf user-agent rules")
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
@@ -4170,6 +4263,10 @@ func serverDetailHandler(
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to create user agent rule")
+					return
+				}
+				if err := callL7UpdateUserAgent(r.Context(), servers, serverID, wafUserAgent); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf user-agent rules")
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
@@ -4198,6 +4295,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to update user agent rule")
 					return
 				}
+				if err := callL7UpdateUserAgent(r.Context(), servers, serverID, wafUserAgent); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf user-agent rules")
+					return
+				}
 				writeJSON(w, http.StatusOK, updated)
 			case http.MethodDelete:
 				if ruleID == 0 || isBatch {
@@ -4206,6 +4307,10 @@ func serverDetailHandler(
 				}
 				if err := wafUserAgent.Delete(r.Context(), serverID, ruleID); err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to delete user agent rule")
+					return
+				}
+				if err := callL7UpdateUserAgent(r.Context(), servers, serverID, wafUserAgent); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync waf user-agent rules")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
