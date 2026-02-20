@@ -2739,6 +2739,76 @@ func callL7UpdateUserAgent(ctx context.Context, servers store.ServerStore, serve
 	return nil
 }
 
+// l7UpstreamServersUpdatePayload is sent to api_parser's
+// /API/L7/l7_update_upstreamservers endpoint when upstream servers change.
+type l7UpstreamServersUpdatePayload struct {
+	ServerID   int64                     `json:"serverId"`
+	Upstreams  []upstreamServerPayloadL7 `json:"upstreams"`
+}
+
+// upstreamServerPayloadL7 is the per-upstream shape expected by api_parser.
+type upstreamServerPayloadL7 struct {
+	ID          int64  `json:"id"`
+	ServerID    int64  `json:"serverId"`
+	IpPort      string `json:"ip_port"`
+	Description string `json:"description"`
+}
+
+// l7UpstreamServersUpdateURL is the api_parser endpoint for upstream servers.
+const l7UpstreamServersUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_upstreamservers"
+
+// callL7UpdateUpstreamServers loads all upstream servers for the given server
+// and sends them to api_parser via the l7_update_upstreamservers API using POST.
+func callL7UpdateUpstreamServers(ctx context.Context, serverID int64, upstreamServers store.UpstreamServerStore) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	list, err := upstreamServers.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load upstream servers: %w", err)
+	}
+
+	upstreams := make([]upstreamServerPayloadL7, 0, len(list))
+	for _, u := range list {
+		upstreams = append(upstreams, upstreamServerPayloadL7{
+			ID:          u.ID,
+			ServerID:    u.ServerID,
+			IpPort:      strings.TrimSpace(u.Address),
+			Description: strings.TrimSpace(u.Description),
+		})
+	}
+
+	payload := l7UpstreamServersUpdatePayload{
+		ServerID:  serverID,
+		Upstreams: upstreams,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 upstreamservers payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7UpstreamServersUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_upstreamservers request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_upstreamservers request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_upstreamservers returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
 func serverDetailHandler(
 	agentClient *AgentClient,
 	servers store.ServerStore,
@@ -4350,6 +4420,10 @@ func serverDetailHandler(
 						writeError(w, http.StatusInternalServerError, "failed to delete upstream servers")
 						return
 					}
+					if err := callL7UpdateUpstreamServers(r.Context(), serverID, upstreamServers); err != nil {
+						writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
@@ -4369,6 +4443,10 @@ func serverDetailHandler(
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to create upstream server")
+					return
+				}
+				if err := callL7UpdateUpstreamServers(r.Context(), serverID, upstreamServers); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
@@ -4395,6 +4473,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to update upstream server")
 					return
 				}
+				if err := callL7UpdateUpstreamServers(r.Context(), serverID, upstreamServers); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
+					return
+				}
 				writeJSON(w, http.StatusOK, updated)
 			case http.MethodDelete:
 				if upstreamID == 0 || isBatch {
@@ -4403,6 +4485,10 @@ func serverDetailHandler(
 				}
 				if err := upstreamServers.Delete(r.Context(), serverID, upstreamID); err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to delete upstream server")
+					return
+				}
+				if err := callL7UpdateUpstreamServers(r.Context(), serverID, upstreamServers); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
