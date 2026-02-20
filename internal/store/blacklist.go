@@ -8,11 +8,12 @@ import (
 )
 
 type BlacklistEntry struct {
-	ID         int64  `json:"id"`
-	ServerID   int64  `json:"serverId"`
+	ID          int64  `json:"id"`
+	ServerID    int64  `json:"serverId"`
 	IPAddress  string `json:"ipAddress"`
 	Geolocation string `json:"geolocation"`
 	Reason     string `json:"reason"`
+	URL        string `json:"url"`
 	Server     string `json:"server"`
 	TTL        string `json:"ttl"`
 	TriggerRule string `json:"triggerRule"`
@@ -22,11 +23,12 @@ type BlacklistEntry struct {
 }
 
 type BlacklistInput struct {
-	IPAddress  string
+	IPAddress   string
 	Geolocation string
-	Reason     string
-	Server     string
-	TTL        string
+	Reason      string
+	URL         string
+	Server      string
+	TTL         string
 	TriggerRule string
 }
 
@@ -53,6 +55,7 @@ func (store *blacklistStore) List(ctx context.Context, serverID int64) ([]Blackl
 		       b.ip_address,
 		       b.geolocation,
 		       b.reason,
+		       b.url,
 		       b.server,
 		       b.ttl,
 		       b.trigger_rule,
@@ -75,6 +78,7 @@ func (store *blacklistStore) List(ctx context.Context, serverID int64) ([]Blackl
 	var entries []BlacklistEntry
 	for rows.Next() {
 		var entry BlacklistEntry
+		var url sql.NullString
 		var serverText sql.NullString
 		var ttl sql.NullString
 		var triggerRule sql.NullString
@@ -88,6 +92,7 @@ func (store *blacklistStore) List(ctx context.Context, serverID int64) ([]Blackl
 			&entry.IPAddress,
 			&entry.Geolocation,
 			&entry.Reason,
+			&url,
 			&serverText,
 			&ttl,
 			&triggerRule,
@@ -99,6 +104,7 @@ func (store *blacklistStore) List(ctx context.Context, serverID int64) ([]Blackl
 			return nil, err
 		}
 
+		entry.URL = strings.TrimSpace(nullStringValue(url))
 		entry.Server = strings.TrimSpace(nullStringValue(serverText))
 		if entry.Server == "" {
 			entry.Server = nullStringValue(serverName)
@@ -127,12 +133,13 @@ func (store *blacklistStore) Count(ctx context.Context) (int64, error) {
 
 func (store *blacklistStore) Create(ctx context.Context, serverID int64, input BlacklistInput) (BlacklistEntry, error) {
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO blacklist (server_id, ip_address, geolocation, reason, server, ttl, trigger_rule)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO blacklist (server_id, ip_address, geolocation, reason, url, server, ttl, trigger_rule)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		serverID,
 		input.IPAddress,
 		input.Geolocation,
 		input.Reason,
+		nullableServerString(input.URL),
 		nullableServerString(input.Server),
 		nullableServerString(input.TTL),
 		nullableServerString(input.TriggerRule),
@@ -156,6 +163,7 @@ func (store *blacklistStore) Create(ctx context.Context, serverID int64, input B
 		IPAddress:   input.IPAddress,
 		Geolocation: input.Geolocation,
 		Reason:      input.Reason,
+		URL:         strings.TrimSpace(input.URL),
 		Server:      strings.TrimSpace(input.Server),
 		TTL:         input.TTL,
 		TriggerRule: input.TriggerRule,

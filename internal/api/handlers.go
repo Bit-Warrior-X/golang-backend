@@ -442,6 +442,7 @@ func buildBlacklistInput(serverName string, payload reportXdpPayload) store.Blac
 	return store.BlacklistInput{
 		IPAddress:   payload.IP,
 		Reason:      reason,
+		URL:         "",
 		Server:      serverName,
 		TTL:         payload.TTL,
 		TriggerRule: payload.AttackType,
@@ -1988,6 +1989,7 @@ type serverBlacklistPayload struct {
 	IPAddress   string `json:"ipAddress"`
 	Geolocation string `json:"geolocation"`
 	Reason      string `json:"reason"`
+	URL         string `json:"url"`
 	Server      string `json:"server"`
 	TTL         string `json:"ttl"`
 	TriggerRule string `json:"triggerRule"`
@@ -2051,11 +2053,13 @@ func serverBlacklistHandler(blacklist store.BlacklistStore) http.HandlerFunc {
 				ttl := strings.TrimSpace(payload.TTL)
 				triggerRule := strings.TrimSpace(payload.TriggerRule)
 				serverName := strings.TrimSpace(payload.Server)
+				url := strings.TrimSpace(payload.URL)
 
 				created, err := blacklist.Create(r.Context(), payload.ServerID, store.BlacklistInput{
 					IPAddress:   ipAddress,
 					Geolocation: geolocation,
 					Reason:      reason,
+					URL:         url,
 					Server:      serverName,
 					TTL:         ttl,
 					TriggerRule: triggerRule,

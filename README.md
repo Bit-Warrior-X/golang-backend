@@ -75,6 +75,28 @@ CREATE TABLE IF NOT EXISTS server_users (
   FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS blacklist (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  server_id BIGINT NOT NULL,
+  ip_address VARCHAR(255) NOT NULL,
+  geolocation VARCHAR(255),
+  reason VARCHAR(512),
+  url VARCHAR(1024),
+  server VARCHAR(255),
+  ttl VARCHAR(128),
+  trigger_rule VARCHAR(128),
+  created_at DATETIME,
+  expire_at DATETIME,
+  updated_at DATETIME,
+  FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+);
+```
+
+If the `blacklist` table already exists without a `url` column, add it with:
+
+```sql
+ALTER TABLE blacklist ADD COLUMN url VARCHAR(1024) NULL AFTER reason;
 ```
 
 ## Endpoints
