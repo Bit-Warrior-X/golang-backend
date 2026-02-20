@@ -18,10 +18,12 @@ import (
 )
 
 const (
-	defaultAccessLogPath  = "/var/log/nginx/access.log"
+	//defaultAccessLogPath  = "/var/log/nginx/access.log"
+	defaultAccessLogPath  = "/usr/local/openresty/nginx/logs/access.log"
 	defaultAccessLogLines = 200
 	maxAccessLogLines     = 2000
 	accessLogStreamMaxDur = 30 * time.Minute
+	maxStreamsPerServer   = 3 // allow reconnects and multiple tabs
 )
 
 var (
@@ -52,7 +54,7 @@ func streamAccessLog(w http.ResponseWriter, r *http.Request, servers store.Serve
 	defer conn.Close()
 
 	accessLogStreamMu.Lock()
-	if accessLogStreamActive[serverID] > 0 {
+	if accessLogStreamActive[serverID] >= maxStreamsPerServer {
 		accessLogStreamMu.Unlock()
 		_ = conn.WriteJSON(errorResponse{Error: "busy", Message: "access log stream already active for this server"})
 		return
@@ -155,19 +157,37 @@ func streamAccessLog(w http.ResponseWriter, r *http.Request, servers store.Serve
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
+	lineCh := make(chan string, 64)
+	go func() {
+		defer close(lineCh)
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			line := scanner.Text()
+			if line != "" {
+				select {
+				case lineCh <- line:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		default:
-		}
-
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		if err := conn.WriteJSON(accessLogMessage{Line: line}); err != nil {
-			return
+		case line, ok := <-lineCh:
+			if !ok {
+				return
+			}
+			if err := conn.WriteJSON(accessLogMessage{Line: line}); err != nil {
+				return
+			}
 		}
 	}
 }
