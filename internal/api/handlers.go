@@ -351,11 +351,11 @@ func reportXdpHandler(
 				writeError(w, http.StatusBadRequest, "missing ip")
 				return
 			}
-			input := buildBlacklistInput(server.Name, payload)
-			if _, err := blacklist.Create(r.Context(), server.ID, input); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to store blacklist entry")
-				return
-			}
+			//input := buildBlacklistInput(server.Name, payload)
+			//if _, err := blacklist.Create(r.Context(), server.ID, input); err != nil {
+			//	writeError(w, http.StatusInternalServerError, "failed to store blacklist entry")
+			//	return
+			//}
 			if err := l4LiveAttack.Create(r.Context(), server.ID, payload.IP, payload.AttackType); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to store l4 live attack")
 				return
@@ -2394,9 +2394,9 @@ func callL7UpdateGeo(ctx context.Context, servers store.ServerStore, serverID in
 // l7AntiHeaderUpdatePayload is sent to api_parser's /API/L7/l7_update_antiheader
 // endpoint to keep the L7 (WAF) anti-header rules for a server in sync.
 type l7AntiHeaderUpdatePayload struct {
-	ServerID int64                      `json:"serverId"`
-	ServerIP string                     `json:"serverIp"`
-	Rules    []store.WafAntiHeaderRule  `json:"rules"`
+	ServerID int64                     `json:"serverId"`
+	ServerIP string                    `json:"serverIp"`
+	Rules    []store.WafAntiHeaderRule `json:"rules"`
 }
 
 // l7AntiHeaderUpdateURL is the api_parser endpoint that receives full L7
@@ -2465,9 +2465,9 @@ func callL7UpdateAntiHeader(ctx context.Context, servers store.ServerStore, serv
 // /API/L7/l7_update_intervalfreqlimit endpoint to keep the L7 (WAF)
 // interval frequency limit rules for a server in sync.
 type l7IntervalFreqLimitUpdatePayload struct {
-	ServerID int64                           `json:"serverId"`
-	ServerIP string                          `json:"serverIp"`
-	Rules    []intervalFreqLimitRulePayload  `json:"rules"`
+	ServerID int64                          `json:"serverId"`
+	ServerIP string                         `json:"serverIp"`
+	Rules    []intervalFreqLimitRulePayload `json:"rules"`
 }
 
 // intervalFreqLimitRulePayload is the per-rule shape expected by api_parser.
@@ -2643,7 +2643,7 @@ func callL7UpdateSecondFreqLimit(ctx context.Context, servers store.ServerStore,
 // /API/L7/l7_update_temporaryblacklist endpoint to keep the temporary blacklist
 // entries in sync for a server.
 type l7TemporaryBlacklistUpdatePayload struct {
-	ServerID           int64                              `json:"serverId"`
+	ServerID           int64                             `json:"serverId"`
 	TemporaryBlacklist []l7TemporaryBlacklistUpdateEntry `json:"temporaryblacklist"`
 }
 
@@ -2721,9 +2721,9 @@ func callL7UpdateTemporaryBlacklist(ctx context.Context, serverID int64, blackli
 // /API/L7/l7_update_responsefreq endpoint to keep the L7 (WAF)
 // response frequency rules for a server in sync.
 type l7ResponseFreqUpdatePayload struct {
-	ServerID int64                      `json:"serverId"`
-	ServerIP string                     `json:"serverIp"`
-	Rules    []responseFreqRulePayload  `json:"rules"`
+	ServerID int64                     `json:"serverId"`
+	ServerIP string                    `json:"serverIp"`
+	Rules    []responseFreqRulePayload `json:"rules"`
 }
 
 // responseFreqRulePayload is the per-rule shape expected by api_parser.
@@ -2812,9 +2812,9 @@ func callL7UpdateResponseFreq(ctx context.Context, servers store.ServerStore, se
 // /API/L7/l7_update_useragent endpoint to keep the L7 (WAF) user agent rules
 // for a server in sync.
 type l7UserAgentUpdatePayload struct {
-	ServerID int64                      `json:"serverId"`
-	ServerIP string                     `json:"serverIp"`
-	Rules    []userAgentRulePayload     `json:"rules"`
+	ServerID int64                  `json:"serverId"`
+	ServerIP string                 `json:"serverIp"`
+	Rules    []userAgentRulePayload `json:"rules"`
 }
 
 // userAgentRulePayload is the per-rule shape expected by api_parser.
@@ -2900,8 +2900,8 @@ func callL7UpdateUserAgent(ctx context.Context, servers store.ServerStore, serve
 // l7UpstreamServersUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_upstreamservers endpoint when upstream servers change.
 type l7UpstreamServersUpdatePayload struct {
-	ServerID   int64                     `json:"serverId"`
-	Upstreams  []upstreamServerPayloadL7 `json:"upstreams"`
+	ServerID  int64                     `json:"serverId"`
+	Upstreams []upstreamServerPayloadL7 `json:"upstreams"`
 }
 
 // upstreamServerPayloadL7 is the per-upstream shape expected by api_parser.
