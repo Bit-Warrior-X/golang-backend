@@ -17,6 +17,8 @@ type Config struct {
 	DBPort              string
 	DBName              string
 	DSN                 string
+	RedisAddr           string
+	RedisPassword       string
 	AgentScheme         string
 	AgentPort           string
 	AgentL4Path         string
@@ -33,6 +35,8 @@ func Load() Config {
 		DBHost:              "127.0.0.1",
 		DBPort:              "3306",
 		DBName:              "cdnproxy",
+		RedisAddr:           "127.0.0.1:6379",
+		RedisPassword:       "",
 		AgentScheme:         "http",
 		AgentPort:           "5000",
 		AgentL4Path:         "/API/L4/l4_firewall_data",
@@ -68,6 +72,12 @@ func Load() Config {
 	}
 	if dsn := strings.TrimSpace(os.Getenv("DB_DSN")); dsn != "" {
 		cfg.DSN = dsn
+	}
+	if addr := strings.TrimSpace(os.Getenv("REDIS_ADDR")); addr != "" {
+		cfg.RedisAddr = addr
+	}
+	if os.Getenv("REDIS_PASSWORD") != "" {
+		cfg.RedisPassword = os.Getenv("REDIS_PASSWORD")
 	}
 	if agentScheme := strings.TrimSpace(os.Getenv("AGENT_SCHEME")); agentScheme != "" {
 		cfg.AgentScheme = agentScheme
@@ -124,6 +134,8 @@ type fileConfig struct {
 	DBPort              *string  `json:"dbPort"`
 	DBName              *string  `json:"dbName"`
 	DSN                 *string  `json:"dsn"`
+	RedisAddr           *string  `json:"redisAddr"`
+	RedisPassword       *string  `json:"redisPassword"`
 	AgentScheme         *string  `json:"agentScheme"`
 	AgentPort           *string  `json:"agentPort"`
 	AgentL4Path         *string  `json:"agentL4Path"`
@@ -174,6 +186,12 @@ func applyFileConfig(cfg *Config, fileCfg fileConfig) {
 	}
 	if fileCfg.DSN != nil && strings.TrimSpace(*fileCfg.DSN) != "" {
 		cfg.DSN = strings.TrimSpace(*fileCfg.DSN)
+	}
+	if fileCfg.RedisAddr != nil && strings.TrimSpace(*fileCfg.RedisAddr) != "" {
+		cfg.RedisAddr = strings.TrimSpace(*fileCfg.RedisAddr)
+	}
+	if fileCfg.RedisPassword != nil {
+		cfg.RedisPassword = *fileCfg.RedisPassword
 	}
 	if fileCfg.AgentScheme != nil && strings.TrimSpace(*fileCfg.AgentScheme) != "" {
 		cfg.AgentScheme = strings.TrimSpace(*fileCfg.AgentScheme)

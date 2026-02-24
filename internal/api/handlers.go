@@ -141,6 +141,9 @@ func registerRoutes(
 	mux.HandleFunc("/servers", serversHandler(servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
 	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(blacklist))
+	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
+	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
+	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/servers/", serverDetailHandler(agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
@@ -2088,6 +2091,13 @@ func serverBlacklistHandler(blacklist store.BlacklistStore) http.HandlerFunc {
 					writeError(w, http.StatusInternalServerError, "failed to flush blacklist entries")
 					return
 				}
+				// After flushing the temporary blacklist for a server, notify api_parser.
+				if serverID > 0 {
+					if err := callL7UpdateTemporaryBlacklist(r.Context(), serverID, blacklist); err != nil {
+						writeError(w, http.StatusBadGateway, "failed to sync temporary blacklist")
+						return
+					}
+				}
 				w.WriteHeader(http.StatusNoContent)
 			default:
 				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -2113,11 +2123,77 @@ func serverBlacklistHandler(blacklist store.BlacklistStore) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		// Resolve serverID for this entry from query parameter if provided, or
+		// from the stored payload as a fallback.
+		var serverID int64
+		if rawServerID := strings.TrimSpace(r.URL.Query().Get("serverId")); rawServerID != "" {
+			parsed, ok := parsePositiveInt(rawServerID)
+			if !ok {
+				writeError(w, http.StatusBadRequest, "invalid serverId")
+				return
+			}
+			serverID = parsed
+		}
+		if serverID == 0 {
+			if payload, err := blacklist.GetPayload(r.Context(), entryID); err == nil {
+				serverID = payload.ServerID
+			}
+		}
 		if err := blacklist.Delete(r.Context(), entryID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to delete blacklist entry")
 			return
 		}
+		// After deleting a single temporary blacklist entry, notify api_parser.
+		if serverID > 0 {
+			if err := callL7UpdateTemporaryBlacklist(r.Context(), serverID, blacklist); err != nil {
+				writeError(w, http.StatusBadGateway, "failed to sync temporary blacklist")
+				return
+			}
+		}
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func temporaryBlacklistAddedHandler(servers store.ServerStore, blacklist store.BlacklistStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var payload store.TemporaryBlacklistPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		if strings.TrimSpace(payload.IP) == "" {
+			writeError(w, http.StatusBadRequest, "ip is required")
+			return
+		}
+		token := strings.TrimSpace(payload.Token)
+		if token == "" {
+			writeError(w, http.StatusForbidden, "missing token")
+			return
+		}
+
+		server, err := servers.GetByToken(r.Context(), token)
+		if err != nil {
+			if store.IsNotFound(err) {
+				writeError(w, http.StatusForbidden, "invalid token")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to validate token")
+			return
+		}
+
+		payload.ServerID = server.ID
+		payload.Server = server.Name
+
+		created, err := blacklist.CreateFromPayload(r.Context(), payload)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to store blacklist entry")
+			return
+		}
+		writeJSON(w, http.StatusCreated, created)
 	}
 }
 
@@ -2558,6 +2634,84 @@ func callL7UpdateSecondFreqLimit(ctx context.Context, servers store.ServerStore,
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("l7_update_secondfreqlimit returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
+// l7TemporaryBlacklistUpdatePayload is sent to api_parser's
+// /API/L7/l7_update_temporaryblacklist endpoint to keep the temporary blacklist
+// entries in sync for a server.
+type l7TemporaryBlacklistUpdatePayload struct {
+	ServerID           int64                              `json:"serverId"`
+	TemporaryBlacklist []l7TemporaryBlacklistUpdateEntry `json:"temporaryblacklist"`
+}
+
+// l7TemporaryBlacklistUpdateEntry represents a single temporary blacklist item
+// as expected by api_parser.
+type l7TemporaryBlacklistUpdateEntry struct {
+	IP          string `json:"ip"`
+	URL         string `json:"url"`
+	Country     string `json:"country"`
+	Province    string `json:"province"`
+	BlockedAt   string `json:"blocked_at"`
+	TTL         int64  `json:"ttl"`
+	TriggerRule string `json:"trigger_rule"`
+}
+
+// l7TemporaryBlacklistUpdateURL is the api_parser endpoint that receives full
+// temporary blacklist data whenever entries change.
+const l7TemporaryBlacklistUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_temporaryblacklist"
+
+// callL7UpdateTemporaryBlacklist loads all temporary blacklist payloads for the
+// given server and sends them to api_parser via the l7_update_temporaryblacklist
+// API using POST.
+func callL7UpdateTemporaryBlacklist(ctx context.Context, serverID int64, blacklist store.BlacklistStore) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	payloads, err := blacklist.ListPayloadsByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load temporary blacklist payloads: %w", err)
+	}
+
+	items := make([]l7TemporaryBlacklistUpdateEntry, 0, len(payloads))
+	for _, p := range payloads {
+		items = append(items, l7TemporaryBlacklistUpdateEntry{
+			IP:          strings.TrimSpace(p.IP),
+			URL:         strings.TrimSpace(p.URL),
+			Country:     strings.TrimSpace(p.Country),
+			Province:    strings.TrimSpace(p.Province),
+			BlockedAt:   strings.TrimSpace(p.BlockedAt),
+			TTL:         p.TTL,
+			TriggerRule: strings.TrimSpace(p.TriggerRule),
+		})
+	}
+
+	body, err := json.Marshal(l7TemporaryBlacklistUpdatePayload{
+		ServerID:           serverID,
+		TemporaryBlacklist: items,
+	})
+	if err != nil {
+		return fmt.Errorf("encode l7 temporary blacklist payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7TemporaryBlacklistUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_temporaryblacklist request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_temporaryblacklist request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_temporaryblacklist returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
 	}
 
 	return nil

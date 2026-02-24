@@ -28,6 +28,16 @@ func main() {
 		}
 	}()
 
+	redisClient, err := db.OpenRedis(cfg)
+	if err != nil {
+		log.Fatalf("redis connection failed: %v", err)
+	}
+	defer func() {
+		if closeErr := redisClient.Close(); closeErr != nil {
+			log.Printf("redis close failed: %v", closeErr)
+		}
+	}()
+
 	userStore := store.NewUserStore(connection)
 	l4Store := store.NewL4Store(connection)
 	l4WhitelistStore := store.NewL4WhitelistStore(connection)
@@ -47,7 +57,7 @@ func main() {
 	wafResponseStore := store.NewWafResponseStore(connection)
 	wafUserAgentStore := store.NewWafUserAgentStore(connection)
 	upstreamStore := store.NewUpstreamServerStore(connection)
-	blacklistStore := store.NewBlacklistStore(connection)
+	blacklistStore := store.NewBlacklistStore(redisClient)
 	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, blacklistStore)
 
 	server := &http.Server{

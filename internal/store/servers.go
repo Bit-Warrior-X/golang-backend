@@ -535,6 +535,13 @@ func formatDate(value sql.NullTime) string {
 	return value.Time.Format("Jan 02, 2006")
 }
 
+func formatTimestamp(value sql.NullTime) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.Time.UTC().Format(time.RFC3339)
+}
+
 func normalizeStatus(status string) (string, string) {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "normal":
