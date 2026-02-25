@@ -19,7 +19,7 @@ import (
 
 const (
 	//defaultAccessLogPath  = "/var/log/nginx/access.log"
-	defaultAccessLogPath  = "/usr/local/openresty/nginx/logs/access.log"
+	defaultAccessLogPath  = "/tmp/on"
 	defaultAccessLogLines = 200
 	maxAccessLogLines     = 2000
 	accessLogStreamMaxDur = 30 * time.Minute
