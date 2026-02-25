@@ -132,6 +132,10 @@ type BlockedRequestPoint struct {
 
 type ServerTrafficStatsStore interface {
 	ListBandwidth(ctx context.Context, start, end time.Time, serverID int64) ([]ServerBandwidthPoint, error)
+	ListNicRxBandwidthByServer(ctx context.Context, start, end time.Time, serverID int64) ([]ServerBandwidthPoint, error)
+	ListNicTxBandwidthByServer(ctx context.Context, start, end time.Time, serverID int64) ([]ServerBandwidthPoint, error)
+	ListL7RxBandwidthByServer(ctx context.Context, start, end time.Time, serverID int64) ([]ServerBandwidthPoint, error)
+	ListL7TxBandwidthByServer(ctx context.Context, start, end time.Time, serverID int64) ([]ServerBandwidthPoint, error)
 	ListNicRxBandwidthAggregate(ctx context.Context, start, end time.Time, serverID int64) ([]TrafficPoint, error)
 	ListNicTxBandwidthAggregate(ctx context.Context, start, end time.Time, serverID int64) ([]TrafficPoint, error)
 	ListL7RxBandwidthAggregate(ctx context.Context, start, end time.Time, serverID int64) ([]TrafficPoint, error)
@@ -179,6 +183,138 @@ func NewServerTrafficStatsStore(db *sql.DB) ServerTrafficStatsStore {
 func (store *serverTrafficStatsStore) ListBandwidth(ctx context.Context, start, end time.Time, serverID int64) ([]ServerBandwidthPoint, error) {
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT server_id, bucket_ts, bandwidth
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)
+		ORDER BY server_id, bucket_ts`,
+		start,
+		end,
+		serverID,
+		serverID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var points []ServerBandwidthPoint
+	for rows.Next() {
+		var item ServerBandwidthPoint
+		var bucket time.Time
+		if err := rows.Scan(&item.ServerID, &bucket, &item.Bandwidth); err != nil {
+			return nil, err
+		}
+		item.Timestamp = bucket.Format(time.RFC3339)
+		points = append(points, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return points, nil
+}
+
+func (store *serverTrafficStatsStore) ListNicRxBandwidthByServer(ctx context.Context, start, end time.Time, serverID int64) ([]ServerBandwidthPoint, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT server_id, bucket_ts, bandwidth_nic_rx
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)
+		ORDER BY server_id, bucket_ts`,
+		start,
+		end,
+		serverID,
+		serverID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var points []ServerBandwidthPoint
+	for rows.Next() {
+		var item ServerBandwidthPoint
+		var bucket time.Time
+		if err := rows.Scan(&item.ServerID, &bucket, &item.Bandwidth); err != nil {
+			return nil, err
+		}
+		item.Timestamp = bucket.Format(time.RFC3339)
+		points = append(points, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return points, nil
+}
+
+func (store *serverTrafficStatsStore) ListNicTxBandwidthByServer(ctx context.Context, start, end time.Time, serverID int64) ([]ServerBandwidthPoint, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT server_id, bucket_ts, bandwidth_nic_tx
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)
+		ORDER BY server_id, bucket_ts`,
+		start,
+		end,
+		serverID,
+		serverID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var points []ServerBandwidthPoint
+	for rows.Next() {
+		var item ServerBandwidthPoint
+		var bucket time.Time
+		if err := rows.Scan(&item.ServerID, &bucket, &item.Bandwidth); err != nil {
+			return nil, err
+		}
+		item.Timestamp = bucket.Format(time.RFC3339)
+		points = append(points, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return points, nil
+}
+
+func (store *serverTrafficStatsStore) ListL7RxBandwidthByServer(ctx context.Context, start, end time.Time, serverID int64) ([]ServerBandwidthPoint, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT server_id, bucket_ts, bandwidth_l7_rx
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)
+		ORDER BY server_id, bucket_ts`,
+		start,
+		end,
+		serverID,
+		serverID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var points []ServerBandwidthPoint
+	for rows.Next() {
+		var item ServerBandwidthPoint
+		var bucket time.Time
+		if err := rows.Scan(&item.ServerID, &bucket, &item.Bandwidth); err != nil {
+			return nil, err
+		}
+		item.Timestamp = bucket.Format(time.RFC3339)
+		points = append(points, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return points, nil
+}
+
+func (store *serverTrafficStatsStore) ListL7TxBandwidthByServer(ctx context.Context, start, end time.Time, serverID int64) ([]ServerBandwidthPoint, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT server_id, bucket_ts, bandwidth_l7_tx
 		FROM server_traffic_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?
 		  AND (? = 0 OR server_id = ?)
@@ -1334,7 +1470,7 @@ func (store *serverTrafficStatsStore) LatestNicTxBandwidth(ctx context.Context, 
 	)
 	if err := row.Scan(&bucket, &bandwidthNicTx); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, time.Time{}, errors.New("failed to load latest nic tx bandwidth")
+				return 0, time.Time{}, errors.New("failed to load latest nic tx bandwidth")
 		}
 		return 0, time.Time{}, errors.New("failed to load latest nic tx bandwidth")
 	}

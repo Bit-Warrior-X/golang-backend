@@ -73,6 +73,14 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats))
 	mux.HandleFunc("/api/v1/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats))
+	mux.HandleFunc("/dashboard/bandwidth-nic-rx", dashboardBandwidthNicRxHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/dashboard/bandwidth-nic-rx", dashboardBandwidthNicRxHandler(serverTrafficStats))
+	mux.HandleFunc("/dashboard/bandwidth-nic-tx", dashboardBandwidthNicTxHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/dashboard/bandwidth-nic-tx", dashboardBandwidthNicTxHandler(serverTrafficStats))
+	mux.HandleFunc("/dashboard/bandwidth-l7-rx", dashboardBandwidthL7RxHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/dashboard/bandwidth-l7-rx", dashboardBandwidthL7RxHandler(serverTrafficStats))
+	mux.HandleFunc("/dashboard/bandwidth-l7-tx", dashboardBandwidthL7TxHandler(serverTrafficStats))
+	mux.HandleFunc("/api/v1/dashboard/bandwidth-l7-tx", dashboardBandwidthL7TxHandler(serverTrafficStats))
 	mux.HandleFunc("/dashboard/request-response", dashboardRequestResponseHandler(serverTrafficStats))
 	mux.HandleFunc("/api/v1/dashboard/request-response", dashboardRequestResponseHandler(serverTrafficStats))
 	mux.HandleFunc("/dashboard/status-codes", dashboardStatusCodesHandler(serverTrafficStats))
@@ -583,6 +591,28 @@ type bandwidthSeries struct {
 }
 
 func dashboardBandwidthHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return dashboardBandwidthByServerHandler(stats, stats.ListBandwidth)
+}
+
+func dashboardBandwidthNicRxHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return dashboardBandwidthByServerHandler(stats, stats.ListNicRxBandwidthByServer)
+}
+
+func dashboardBandwidthNicTxHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return dashboardBandwidthByServerHandler(stats, stats.ListNicTxBandwidthByServer)
+}
+
+func dashboardBandwidthL7RxHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return dashboardBandwidthByServerHandler(stats, stats.ListL7RxBandwidthByServer)
+}
+
+func dashboardBandwidthL7TxHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+	return dashboardBandwidthByServerHandler(stats, stats.ListL7TxBandwidthByServer)
+}
+
+type bandwidthByServerFunc func(context.Context, time.Time, time.Time, int64) ([]store.ServerBandwidthPoint, error)
+
+func dashboardBandwidthByServerHandler(stats store.ServerTrafficStatsStore, listFn bandwidthByServerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -604,7 +634,7 @@ func dashboardBandwidthHandler(stats store.ServerTrafficStatsStore) http.Handler
 		end := time.Now()
 		start := end.Add(-rangeValue)
 
-		points, err := stats.ListBandwidth(r.Context(), start, end, serverID)
+		points, err := listFn(r.Context(), start, end, serverID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load bandwidth stats")
 			return
@@ -692,6 +722,8 @@ func dashboardStatusCodesHandler(stats store.ServerTrafficStatsStore) http.Handl
 
 func parseBandwidthRange(value string) time.Duration {
 	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "30m":
+		return 30 * time.Minute
 	case "1h":
 		return time.Hour
 	case "2h":
@@ -704,6 +736,8 @@ func parseBandwidthRange(value string) time.Duration {
 		return 12 * time.Hour
 	case "24h":
 		return 24 * time.Hour
+	case "48h":
+		return 48 * time.Hour
 	default:
 		return 30 * time.Minute
 	}
