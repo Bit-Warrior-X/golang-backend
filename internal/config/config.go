@@ -8,40 +8,58 @@ import (
 )
 
 type Config struct {
-	Port                string
-	AllowedOrigins      []string
-	AllowAllCORS        bool
-	DBUser              string
-	DBPassword          string
-	DBHost              string
-	DBPort              string
-	DBName              string
-	DSN                 string
-	RedisAddr           string
-	RedisPassword       string
-	AgentScheme         string
-	AgentPort           string
-	AgentL4Path         string
-	AgentL4OptionsPath  string
-	AgentToken          string
-	AgentTimeoutSeconds int
+	Port                       string
+	AllowedOrigins             []string
+	AllowAllCORS               bool
+	DBUser                     string
+	DBPassword                 string
+	DBHost                     string
+	DBPort                     string
+	DBName                     string
+	DSN                        string
+	RedisAddr                  string
+	RedisPassword              string
+	AgentScheme                string
+	AgentPort                  string
+	AgentL4Path                string
+	AgentL4OptionsPath         string
+	AgentToken                 string
+	AgentTimeoutSeconds        int
+	MetricsPort                string
+	MetricsBucketPath          string
+	MetricsIspBucketPath       string
+	MetricsCountryBucketPath   string
+	MetricsRefererBucketPath   string
+	MetricsURLBucketPath       string
+	MetricsServerTrafficPath   string
+	MetricsUserAgentBucketPath string
+	MetricsPollIntervalSeconds int
 }
 
 func Load() Config {
 	cfg := Config{
-		Port:                "8080",
-		AllowAllCORS:        true,
-		DBUser:              "root",
-		DBHost:              "127.0.0.1",
-		DBPort:              "3306",
-		DBName:              "cdnproxy",
-		RedisAddr:           "127.0.0.1:6379",
-		RedisPassword:       "",
-		AgentScheme:         "http",
-		AgentPort:           "5000",
-		AgentL4Path:         "/API/L4/l4_firewall_data",
-		AgentL4OptionsPath:  "/API/L4/options",
-		AgentTimeoutSeconds: 3,
+		Port:                       "8080",
+		AllowAllCORS:               true,
+		DBUser:                     "root",
+		DBHost:                     "127.0.0.1",
+		DBPort:                     "3306",
+		DBName:                     "cdnproxy",
+		RedisAddr:                  "127.0.0.1:6379",
+		RedisPassword:              "",
+		AgentScheme:                "http",
+		AgentPort:                  "5000",
+		AgentL4Path:                "/API/L4/l4_firewall_data",
+		AgentL4OptionsPath:         "/API/L4/options",
+		AgentTimeoutSeconds:        3,
+		MetricsPort:                "9000",
+		MetricsBucketPath:          "/ip_request_stats",
+		MetricsIspBucketPath:       "/isp_request_stats",
+		MetricsCountryBucketPath:   "/country_request_stats",
+		MetricsRefererBucketPath:   "/referer_request_stats",
+		MetricsURLBucketPath:       "/url_request_stats",
+		MetricsServerTrafficPath:   "/server_traffic_stats",
+		MetricsUserAgentBucketPath: "/useragent_request_stats",
+		MetricsPollIntervalSeconds: 30,
 	}
 
 	configPath := strings.TrimSpace(os.Getenv("CONFIG_FILE"))
@@ -100,6 +118,36 @@ func Load() Config {
 		}
 	}
 
+	if metricsPort := strings.TrimSpace(os.Getenv("METRICS_PORT")); metricsPort != "" {
+		cfg.MetricsPort = metricsPort
+	}
+	if metricsBucketPath := strings.TrimSpace(os.Getenv("METRICS_BUCKET_PATH")); metricsBucketPath != "" {
+		cfg.MetricsBucketPath = metricsBucketPath
+	}
+	if metricsIspBucketPath := strings.TrimSpace(os.Getenv("METRICS_ISP_BUCKET_PATH")); metricsIspBucketPath != "" {
+		cfg.MetricsIspBucketPath = metricsIspBucketPath
+	}
+	if metricsCountryBucketPath := strings.TrimSpace(os.Getenv("METRICS_COUNTRY_BUCKET_PATH")); metricsCountryBucketPath != "" {
+		cfg.MetricsCountryBucketPath = metricsCountryBucketPath
+	}
+	if metricsRefererBucketPath := strings.TrimSpace(os.Getenv("METRICS_REFERER_BUCKET_PATH")); metricsRefererBucketPath != "" {
+		cfg.MetricsRefererBucketPath = metricsRefererBucketPath
+	}
+	if metricsURLBucketPath := strings.TrimSpace(os.Getenv("METRICS_URL_BUCKET_PATH")); metricsURLBucketPath != "" {
+		cfg.MetricsURLBucketPath = metricsURLBucketPath
+	}
+	if metricsServerTrafficPath := strings.TrimSpace(os.Getenv("METRICS_SERVER_TRAFFIC_PATH")); metricsServerTrafficPath != "" {
+		cfg.MetricsServerTrafficPath = metricsServerTrafficPath
+	}
+	if metricsUserAgentBucketPath := strings.TrimSpace(os.Getenv("METRICS_USERAGENT_BUCKET_PATH")); metricsUserAgentBucketPath != "" {
+		cfg.MetricsUserAgentBucketPath = metricsUserAgentBucketPath
+	}
+	if pollRaw := strings.TrimSpace(os.Getenv("METRICS_POLL_INTERVAL_SECONDS")); pollRaw != "" {
+		if parsed, err := strconv.Atoi(pollRaw); err == nil && parsed > 0 {
+			cfg.MetricsPollIntervalSeconds = parsed
+		}
+	}
+
 	if origins := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS")); origins != "" {
 		cfg.AllowedOrigins = splitAndTrim(origins)
 		cfg.AllowAllCORS = false
@@ -125,23 +173,32 @@ func splitAndTrim(value string) []string {
 }
 
 type fileConfig struct {
-	Port                *string  `json:"port"`
-	AllowedOrigins      []string `json:"allowedOrigins"`
-	AllowAllCORS        *bool    `json:"allowAllCors"`
-	DBUser              *string  `json:"dbUser"`
-	DBPassword          *string  `json:"dbPassword"`
-	DBHost              *string  `json:"dbHost"`
-	DBPort              *string  `json:"dbPort"`
-	DBName              *string  `json:"dbName"`
-	DSN                 *string  `json:"dsn"`
-	RedisAddr           *string  `json:"redisAddr"`
-	RedisPassword       *string  `json:"redisPassword"`
-	AgentScheme         *string  `json:"agentScheme"`
-	AgentPort           *string  `json:"agentPort"`
-	AgentL4Path         *string  `json:"agentL4Path"`
-	AgentL4OptionsPath  *string  `json:"agentL4OptionsPath"`
-	AgentToken          *string  `json:"agentToken"`
-	AgentTimeoutSeconds *int     `json:"agentTimeoutSeconds"`
+	Port                       *string  `json:"port"`
+	AllowedOrigins             []string `json:"allowedOrigins"`
+	AllowAllCORS               *bool    `json:"allowAllCors"`
+	DBUser                     *string  `json:"dbUser"`
+	DBPassword                 *string  `json:"dbPassword"`
+	DBHost                     *string  `json:"dbHost"`
+	DBPort                     *string  `json:"dbPort"`
+	DBName                     *string  `json:"dbName"`
+	DSN                        *string  `json:"dsn"`
+	RedisAddr                  *string  `json:"redisAddr"`
+	RedisPassword              *string  `json:"redisPassword"`
+	AgentScheme                *string  `json:"agentScheme"`
+	AgentPort                  *string  `json:"agentPort"`
+	AgentL4Path                *string  `json:"agentL4Path"`
+	AgentL4OptionsPath         *string  `json:"agentL4OptionsPath"`
+	AgentToken                 *string  `json:"agentToken"`
+	AgentTimeoutSeconds        *int     `json:"agentTimeoutSeconds"`
+	MetricsPort                *string  `json:"metricsPort"`
+	MetricsBucketPath          *string  `json:"metricsBucketPath"`
+	MetricsIspBucketPath       *string  `json:"metricsIspBucketPath"`
+	MetricsCountryBucketPath   *string  `json:"metricsCountryBucketPath"`
+	MetricsRefererBucketPath   *string  `json:"metricsRefererBucketPath"`
+	MetricsURLBucketPath       *string  `json:"metricsURLBucketPath"`
+	MetricsServerTrafficPath   *string  `json:"metricsServerTrafficPath"`
+	MetricsUserAgentBucketPath *string  `json:"metricsUserAgentBucketPath"`
+	MetricsPollIntervalSeconds *int     `json:"metricsPollIntervalSeconds"`
 }
 
 func loadFileConfig(path string) (*fileConfig, error) {
@@ -210,5 +267,32 @@ func applyFileConfig(cfg *Config, fileCfg fileConfig) {
 	}
 	if fileCfg.AgentTimeoutSeconds != nil && *fileCfg.AgentTimeoutSeconds > 0 {
 		cfg.AgentTimeoutSeconds = *fileCfg.AgentTimeoutSeconds
+	}
+	if fileCfg.MetricsPort != nil && strings.TrimSpace(*fileCfg.MetricsPort) != "" {
+		cfg.MetricsPort = strings.TrimSpace(*fileCfg.MetricsPort)
+	}
+	if fileCfg.MetricsBucketPath != nil && strings.TrimSpace(*fileCfg.MetricsBucketPath) != "" {
+		cfg.MetricsBucketPath = strings.TrimSpace(*fileCfg.MetricsBucketPath)
+	}
+	if fileCfg.MetricsIspBucketPath != nil && strings.TrimSpace(*fileCfg.MetricsIspBucketPath) != "" {
+		cfg.MetricsIspBucketPath = strings.TrimSpace(*fileCfg.MetricsIspBucketPath)
+	}
+	if fileCfg.MetricsCountryBucketPath != nil && strings.TrimSpace(*fileCfg.MetricsCountryBucketPath) != "" {
+		cfg.MetricsCountryBucketPath = strings.TrimSpace(*fileCfg.MetricsCountryBucketPath)
+	}
+	if fileCfg.MetricsRefererBucketPath != nil && strings.TrimSpace(*fileCfg.MetricsRefererBucketPath) != "" {
+		cfg.MetricsRefererBucketPath = strings.TrimSpace(*fileCfg.MetricsRefererBucketPath)
+	}
+	if fileCfg.MetricsURLBucketPath != nil && strings.TrimSpace(*fileCfg.MetricsURLBucketPath) != "" {
+		cfg.MetricsURLBucketPath = strings.TrimSpace(*fileCfg.MetricsURLBucketPath)
+	}
+	if fileCfg.MetricsServerTrafficPath != nil && strings.TrimSpace(*fileCfg.MetricsServerTrafficPath) != "" {
+		cfg.MetricsServerTrafficPath = strings.TrimSpace(*fileCfg.MetricsServerTrafficPath)
+	}
+	if fileCfg.MetricsUserAgentBucketPath != nil && strings.TrimSpace(*fileCfg.MetricsUserAgentBucketPath) != "" {
+		cfg.MetricsUserAgentBucketPath = strings.TrimSpace(*fileCfg.MetricsUserAgentBucketPath)
+	}
+	if fileCfg.MetricsPollIntervalSeconds != nil && *fileCfg.MetricsPollIntervalSeconds > 0 {
+		cfg.MetricsPollIntervalSeconds = *fileCfg.MetricsPollIntervalSeconds
 	}
 }

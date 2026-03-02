@@ -13,10 +13,14 @@ import (
 	"vue-project-backend/internal/config"
 	"vue-project-backend/internal/db"
 	"vue-project-backend/internal/store"
+	"vue-project-backend/internal/worker"
 )
 
 func main() {
 	cfg := config.Load()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	connection, err := db.Open(cfg)
 	if err != nil {
@@ -60,6 +64,10 @@ func main() {
 	blacklistStore := store.NewBlacklistStore(redisClient)
 	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, blacklistStore)
 
+	// Start background worker to periodically collect IP request statistics
+	// from each server and store them into the database.
+	worker.StartIPRequestStatsCollector(ctx, cfg, connection, serverStore)
+
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           handler,
@@ -80,10 +88,13 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Cancel background workers.
+	cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
 	}
 }
