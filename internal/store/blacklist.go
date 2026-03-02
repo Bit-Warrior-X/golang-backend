@@ -23,7 +23,7 @@ type TemporaryBlacklistPayload struct {
 	IP          string `json:"ip"`
 	URL         string `json:"url"`
 	Country     string `json:"country"`
-	Province    string `json:"province"`
+	City        string `json:"city"`
 	BlockedAt   string `json:"blocked_at"`
 	TTL         int64  `json:"ttl"`
 	TriggerRule string `json:"trigger_rule"`
@@ -145,7 +145,7 @@ func (s *blacklistStore) Create(ctx context.Context, serverID int64, input Black
 		IP:          strings.TrimSpace(input.IPAddress),
 		URL:         strings.TrimSpace(input.URL),
 		Country:     "",
-		Province:    strings.TrimSpace(input.Geolocation),
+		City:        strings.TrimSpace(input.Geolocation),
 		BlockedAt:   strconv.FormatInt(now, 10),
 		TTL:         0,
 		TriggerRule: strings.TrimSpace(input.TriggerRule),
@@ -167,7 +167,7 @@ func (s *blacklistStore) CreateFromPayload(ctx context.Context, p TemporaryBlack
 	p.IP = strings.TrimSpace(p.IP)
 	p.URL = strings.TrimSpace(p.URL)
 	p.Country = strings.TrimSpace(p.Country)
-	p.Province = strings.TrimSpace(p.Province)
+	p.City = strings.TrimSpace(p.City)
 	p.BlockedAt = strings.TrimSpace(p.BlockedAt)
 	if p.BlockedAt == "" {
 		p.BlockedAt = strconv.FormatInt(time.Now().UTC().Unix(), 10)
@@ -273,11 +273,11 @@ func payloadToEntry(id int64, p TemporaryBlacklistPayload) BlacklistEntry {
 		ttlStr = strconv.FormatInt(p.TTL, 10)
 	}
 	geolocation := strings.TrimSpace(p.Country)
-	if p.Province != "" {
+	if p.City != "" {
 		if geolocation != "" {
 			geolocation += ", "
 		}
-		geolocation += strings.TrimSpace(p.Province)
+		geolocation += strings.TrimSpace(p.City)
 	}
 	createdAt := formatUnixTimestamp(p.BlockedAt)
 	return BlacklistEntry{

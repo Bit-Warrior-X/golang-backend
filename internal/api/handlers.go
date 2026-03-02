@@ -2903,7 +2903,7 @@ type l7TemporaryBlacklistUpdateEntry struct {
 	IP          string `json:"ip"`
 	URL         string `json:"url"`
 	Country     string `json:"country"`
-	Province    string `json:"province"`
+	City        string `json:"city"`
 	BlockedAt   string `json:"blocked_at"`
 	TTL         int64  `json:"ttl"`
 	TriggerRule string `json:"trigger_rule"`
@@ -2932,7 +2932,7 @@ func callL7UpdateTemporaryBlacklist(ctx context.Context, serverID int64, blackli
 			IP:          strings.TrimSpace(p.IP),
 			URL:         strings.TrimSpace(p.URL),
 			Country:     strings.TrimSpace(p.Country),
-			Province:    strings.TrimSpace(p.Province),
+			City:        strings.TrimSpace(p.City),
 			BlockedAt:   strings.TrimSpace(p.BlockedAt),
 			TTL:         p.TTL,
 			TriggerRule: strings.TrimSpace(p.TriggerRule),
