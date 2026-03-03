@@ -153,7 +153,7 @@ type ServerTrafficStatsStore interface {
 	SumStatusCodes(ctx context.Context, start, end time.Time, serverID int64) (StatusCodeSummary, error)
 	SumMethods(ctx context.Context, start, end time.Time, serverID int64) (MethodSummary, error)
 	SumProtocols(ctx context.Context, start, end time.Time, serverID int64) (ProtocolSummary, error)
-	SumTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, int64, int64, int64, int64, error)
+	SumTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, int64, int64, int64, error)
 	SumSecurityTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, int64, error)
 	LatestNicRxBandwidth(ctx context.Context, start, end time.Time, serverID int64) (int64, time.Time, error)
 	LatestNicTxBandwidth(ctx context.Context, start, end time.Time, serverID int64) (int64, time.Time, error)
@@ -167,6 +167,7 @@ type ServerTrafficStatsStore interface {
 	ListTopUserAgents(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]TopUserAgentRow, error)
 	SumIspRequests(ctx context.Context, start, end time.Time, serverID int64) (int64, error)
 	SumRefererRequests(ctx context.Context, start, end time.Time, serverID int64) (int64, error)
+	SumIPCountStats(ctx context.Context, start, end time.Time, serverID int64) (int64, error)
 	ListCountryRequests(ctx context.Context, start, end time.Time, serverID int64) ([]CountryRequestRow, error)
 	ListCountryRequestsByRequests(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]CountryRequestRow, error)
 	ListCountryRequestsByBlocked(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]CountryRequestRow, error)
@@ -778,6 +779,24 @@ func (store *serverTrafficStatsStore) SumIspRequests(ctx context.Context, start,
 	return total, nil
 }
 
+func (store *serverTrafficStatsStore) SumIPCountStats(ctx context.Context, start, end time.Time, serverID int64) (int64, error) {
+	var total int64
+	row := store.db.QueryRowContext(ctx, `
+		SELECT COALESCE(COUNT(DISTINCT ip), 0)
+		FROM ip_request_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?
+		  AND (? = 0 OR server_id = ?)`,
+		start,
+		end,
+		serverID,
+		serverID,
+	)
+	if err := row.Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
 func (store *serverTrafficStatsStore) SumRefererRequests(ctx context.Context, start, end time.Time, serverID int64) (int64, error) {
 	var total int64
 	row := store.db.QueryRowContext(ctx, `
@@ -1321,14 +1340,13 @@ func (store *serverTrafficStatsStore) SumProtocols(ctx context.Context, start, e
 	return summary, nil
 }
 
-func (store *serverTrafficStatsStore) SumTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, int64, int64, int64, int64, error) {
+func (store *serverTrafficStatsStore) SumTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, int64, int64, int64, error) {
 	var totalNicRxTraffic int64
 	var totalNicTxTraffic int64
 	var totalL7RxTraffic int64
 	var totalL7TxTraffic int64
 	var totalRequest int64
 	var totalResponse int64
-	var totalIp int64
 	row := store.db.QueryRowContext(ctx, `
 		SELECT
 			COALESCE(CAST(SUM(traffic_nic_rx) AS UNSIGNED), 0),
@@ -1337,7 +1355,6 @@ func (store *serverTrafficStatsStore) SumTotals(ctx context.Context, start, end 
 			COALESCE(CAST(SUM(traffic_l7_tx) AS UNSIGNED), 0),
 			COALESCE(SUM(request_count), 0),
 			COALESCE(SUM(response_count), 0),
-			COALESCE(SUM(ip_count), 0)
 		FROM server_traffic_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?
 		  AND (? = 0 OR server_id = ?)`,
@@ -1346,10 +1363,10 @@ func (store *serverTrafficStatsStore) SumTotals(ctx context.Context, start, end 
 		serverID,
 		serverID,
 	)
-	if err := row.Scan(&totalNicRxTraffic, &totalNicTxTraffic, &totalL7RxTraffic, &totalL7TxTraffic, &totalRequest, &totalResponse, &totalIp); err != nil {
-		return 0, 0, 0, 0, 0, 0, 0, nil
+	if err := row.Scan(&totalNicRxTraffic, &totalNicTxTraffic, &totalL7RxTraffic, &totalL7TxTraffic, &totalRequest, &totalResponse); err != nil {
+		return 0, 0, 0, 0, 0, 0, nil
 	}
-	return totalNicRxTraffic, totalNicTxTraffic, totalL7RxTraffic, totalL7TxTraffic, totalRequest, totalResponse, totalIp, nil
+	return totalNicRxTraffic, totalNicTxTraffic, totalL7RxTraffic, totalL7TxTraffic, totalRequest, totalResponse, nil
 }
 
 func (store *serverTrafficStatsStore) SumSecurityTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, int64, error) {

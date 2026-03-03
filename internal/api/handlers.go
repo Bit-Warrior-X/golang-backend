@@ -814,7 +814,7 @@ func analyticsSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFu
 			return
 		}
 
-		totalNicRxTraffic, totalNicTxTraffic, totalL7RxTraffic, totalL7TxTraffic, totalRequest, totalResponse, totalIp, err := stats.SumTotals(r.Context(), start, end, serverID)
+		totalNicRxTraffic, totalNicTxTraffic, totalL7RxTraffic, totalL7TxTraffic, totalRequest, totalResponse, err := stats.SumTotals(r.Context(), start, end, serverID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load analytics summary")
 			return
@@ -841,6 +841,12 @@ func analyticsSummaryHandler(stats store.ServerTrafficStatsStore) http.HandlerFu
 		l7TxBandwidthLast, l7TxBandwidthLastTime, err := stats.LatestL7TxBandwidth(r.Context(), start, end, serverID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load l7 tx bandwidth")
+			return
+		}
+
+		totalIp, err := stats.SumIPCountStats(r.Context(), start, end, serverID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load ip count")
 			return
 		}
 

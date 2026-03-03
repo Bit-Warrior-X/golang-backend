@@ -620,10 +620,15 @@ func collectIPRequestStatsOnce(ctx context.Context, dbConn *sql.DB, servers stor
 				}
 			}
 
-			// Finally, fetch the aggregated server traffic snapshot for this server.
-			if err := collectServerTrafficSnapshot(ctx, dbConn, httpClient, clientCfg, server.ID, serverIP); err != nil {
-				log.Printf("ip request stats collector: collect server traffic snapshot for server %d (%s): %v", server.ID, serverIP, err)
-			}
+		}
+
+		// After processing per-timestamp metrics, fetch the aggregated
+		// server traffic snapshot and L4 attack stats for this server.
+		if err := collectServerTrafficSnapshot(ctx, dbConn, httpClient, clientCfg, server.ID, serverIP); err != nil {
+			log.Printf("ip request stats collector: collect server traffic snapshot for server %d (%s): %v", server.ID, serverIP, err)
+		}
+		if err := collectL4AttackStatsForServer(ctx, dbConn, httpClient, clientCfg.port, server.ID, serverIP); err != nil {
+			log.Printf("ip request stats collector: collect l4 attack stats for server %d (%s): %v", server.ID, serverIP, err)
 		}
 	}
 
@@ -749,6 +754,225 @@ func parseTimestampInterfaces(items []interface{}) []time.Time {
 		out = append(out, time.Unix(tsInt, 0).UTC())
 	}
 	return out
+}
+
+type l4AttackStatsInner struct {
+	UDP   int64 `json:"udp"`
+	GRE   int64 `json:"gre"`
+	Other int64 `json:"other"`
+	Total int64 `json:"total"`
+	Allow int64 `json:"allow"`
+	Block int64 `json:"block"`
+	Syn   int64 `json:"syn"`
+	Ack   int64 `json:"ack"`
+	ICMP  int64 `json:"icmp"`
+	TCP   int64 `json:"tcp"`
+	Rst   int64 `json:"rst"`
+}
+
+type l4AttackStatsBucketResponse struct {
+	Timestamp int64              `json:"timestamp"`
+	Stats     l4AttackStatsInner `json:"stats"`
+}
+
+func collectL4AttackStatsForServer(
+	ctx context.Context,
+	dbConn *sql.DB,
+	httpClient *http.Client,
+	port string,
+	serverID int64,
+	serverIP string,
+) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	serverIP = strings.TrimSpace(serverIP)
+	if serverIP == "" {
+		return nil
+	}
+
+	latest, ok, err := latestL4AttackBucketForServer(ctx, dbConn, serverID)
+	if err != nil {
+		return fmt.Errorf("load latest l4 attack bucket: %w", err)
+	}
+
+	timestamps, err := fetchL4AttackTimestamps(ctx, httpClient, serverIP, port)
+	if err != nil {
+		return fmt.Errorf("fetch l4 attack timestamps: %w", err)
+	}
+	if len(timestamps) == 0 {
+		return nil
+	}
+
+	sort.Slice(timestamps, func(i, j int) bool { return timestamps[i].Before(timestamps[j]) })
+
+	for _, ts := range timestamps {
+		if ok && !ts.After(latest) {
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		resp, err := fetchL4AttackBucket(ctx, httpClient, serverIP, port, ts.Unix())
+		if err != nil {
+			log.Printf("l4 attack stats collector: fetch bucket %d for server %d (%s): %v", ts.Unix(), serverID, serverIP, err)
+			continue
+		}
+
+		if err := insertL4AttackBucket(ctx, dbConn, serverID, ts, resp); err != nil {
+			log.Printf("l4 attack stats collector: insert bucket %d for server %d (%s): %v", ts.Unix(), serverID, serverIP, err)
+			continue
+		}
+	}
+
+	return nil
+}
+
+func latestL4AttackBucketForServer(ctx context.Context, dbConn *sql.DB, serverID int64) (time.Time, bool, error) {
+	var latest sql.NullTime
+	row := dbConn.QueryRowContext(ctx, `
+		SELECT MAX(bucket_ts)
+		FROM l4_attack_stats
+		WHERE server_id = ?`,
+		serverID,
+	)
+	if err := row.Scan(&latest); err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, err
+	}
+	if !latest.Valid {
+		return time.Time{}, false, nil
+	}
+	return latest.Time, true, nil
+}
+
+func fetchL4AttackTimestamps(ctx context.Context, httpClient *http.Client, serverIP string, port string) ([]time.Time, error) {
+	targetHost := net.JoinHostPort(serverIP, port)
+	url := "http://" + targetHost + "/l4_attack_stats/timestamps"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build l4 timestamps request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("l4 timestamps request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("l4 timestamps request returned status %d", resp.StatusCode)
+	}
+
+	var arr []interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&arr); err != nil {
+		return nil, fmt.Errorf("decode l4 timestamps response: %w", err)
+	}
+
+	return parseTimestampInterfaces(arr), nil
+}
+
+func fetchL4AttackBucket(
+	ctx context.Context,
+	httpClient *http.Client,
+	serverIP string,
+	port string,
+	timestamp int64,
+) (l4AttackStatsBucketResponse, error) {
+	targetHost := net.JoinHostPort(serverIP, port)
+	url := fmt.Sprintf("http://%s/l4_attack_stats?timestamp=%d", targetHost, timestamp)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return l4AttackStatsBucketResponse{}, fmt.Errorf("build l4 bucket request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return l4AttackStatsBucketResponse{}, fmt.Errorf("l4 bucket request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return l4AttackStatsBucketResponse{}, fmt.Errorf("l4 bucket request returned status %d", resp.StatusCode)
+	}
+
+	var parsed l4AttackStatsBucketResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return l4AttackStatsBucketResponse{}, fmt.Errorf("decode l4 bucket response: %w", err)
+	}
+
+	return parsed, nil
+}
+
+func insertL4AttackBucket(
+	ctx context.Context,
+	dbConn *sql.DB,
+	serverID int64,
+	bucket time.Time,
+	data l4AttackStatsBucketResponse,
+) error {
+	_, err := dbConn.ExecContext(
+		ctx,
+		`
+		INSERT INTO l4_attack_stats (
+			server_id,
+			bucket_ts,
+			total_traffic,
+			allowed_traffic,
+			blocked_traffic,
+			tcp,
+			udp,
+			icmp,
+			gre,
+			other,
+			tcp_syn,
+			tcp_ack,
+			tcp_rst
+		) VALUES (
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		)
+		ON DUPLICATE KEY UPDATE
+			total_traffic = VALUES(total_traffic),
+			allowed_traffic = VALUES(allowed_traffic),
+			blocked_traffic = VALUES(blocked_traffic),
+			tcp = VALUES(tcp),
+			udp = VALUES(udp),
+			icmp = VALUES(icmp),
+			gre = VALUES(gre),
+			other = VALUES(other),
+			tcp_syn = VALUES(tcp_syn),
+			tcp_ack = VALUES(tcp_ack),
+			tcp_rst = VALUES(tcp_rst)
+		`,
+		serverID,
+		bucket,
+		data.Stats.Total,
+		data.Stats.Allow,
+		data.Stats.Block,
+		data.Stats.TCP,
+		data.Stats.UDP,
+		data.Stats.ICMP,
+		data.Stats.GRE,
+		data.Stats.Other,
+		data.Stats.Syn,
+		data.Stats.Ack,
+		data.Stats.Rst,
+	)
+	if err != nil {
+		return fmt.Errorf("insert l4_attack_stats: %w", err)
+	}
+	return nil
 }
 
 func fetchIPRequestBucket(ctx context.Context, httpClient *http.Client, serverIP string, timestamp int64, clientCfg ipRequestStatsClientConfig) (ipRequestStatsBucketResponse, error) {
