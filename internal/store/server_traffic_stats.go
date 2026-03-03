@@ -763,7 +763,7 @@ func (store *serverTrafficStatsStore) ListTopUserAgents(ctx context.Context, sta
 func (store *serverTrafficStatsStore) SumIspRequests(ctx context.Context, start, end time.Time, serverID int64) (int64, error) {
 	var total int64
 	row := store.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(request_count), 0)
+		SELECT COALESCE(COUNT(DISTINCT request_isp), 0)
 		FROM isp_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?
 		  AND (? = 0 OR server_id = ?)`,
@@ -781,7 +781,7 @@ func (store *serverTrafficStatsStore) SumIspRequests(ctx context.Context, start,
 func (store *serverTrafficStatsStore) SumRefererRequests(ctx context.Context, start, end time.Time, serverID int64) (int64, error) {
 	var total int64
 	row := store.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(request_count), 0)
+		SELECT COALESCE(COUNT(DISTINCT request_referer), 0)
 		FROM referer_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?
 		  AND (? = 0 OR server_id = ?)`,
@@ -910,7 +910,7 @@ func (store *serverTrafficStatsStore) ListCountryRequestsByBlocked(ctx context.C
 
 func (store *serverTrafficStatsStore) ListNicTxTraffic(ctx context.Context, start, end time.Time, serverID int64) ([]TrafficPoint, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT bucket_ts, SUM(traffic_nic_tx) AS traffic_nic_tx
+		SELECT bucket_ts, CAST(SUM(traffic_nic_tx) AS UNSIGNED) AS traffic_nic_tx
 		FROM server_traffic_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?
 		  AND (? = 0 OR server_id = ?)
@@ -944,7 +944,7 @@ func (store *serverTrafficStatsStore) ListNicTxTraffic(ctx context.Context, star
 
 func (store *serverTrafficStatsStore) ListNicRxTraffic(ctx context.Context, start, end time.Time, serverID int64) ([]TrafficPoint, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT bucket_ts, SUM(traffic_nic_rx) AS traffic_nic_rx
+		SELECT bucket_ts, CAST(SUM(traffic_nic_rx) AS UNSIGNED) AS traffic_nic_rx
 		FROM server_traffic_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?
 		  AND (? = 0 OR server_id = ?)
@@ -978,7 +978,7 @@ func (store *serverTrafficStatsStore) ListNicRxTraffic(ctx context.Context, star
 
 func (store *serverTrafficStatsStore) ListL7TxTraffic(ctx context.Context, start, end time.Time, serverID int64) ([]TrafficPoint, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT bucket_ts, SUM(traffic_l7_tx) AS traffic_l7_tx
+		SELECT bucket_ts, CAST(SUM(traffic_l7_tx) AS UNSIGNED) AS traffic_l7_tx
 		FROM server_traffic_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?
 		  AND (? = 0 OR server_id = ?)
@@ -1012,7 +1012,7 @@ func (store *serverTrafficStatsStore) ListL7TxTraffic(ctx context.Context, start
 
 func (store *serverTrafficStatsStore) ListL7RxTraffic(ctx context.Context, start, end time.Time, serverID int64) ([]TrafficPoint, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT bucket_ts, SUM(traffic_l7_rx) AS traffic_l7_rx
+		SELECT bucket_ts, CAST(SUM(traffic_l7_rx) AS UNSIGNED) AS traffic_l7_rx
 		FROM server_traffic_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?
 		  AND (? = 0 OR server_id = ?)
@@ -1331,10 +1331,10 @@ func (store *serverTrafficStatsStore) SumTotals(ctx context.Context, start, end 
 	var totalIp int64
 	row := store.db.QueryRowContext(ctx, `
 		SELECT
-			COALESCE(SUM(traffic_nic_rx), 0),
-			COALESCE(SUM(traffic_nic_tx), 0),
-			COALESCE(SUM(traffic_l7_rx), 0),
-			COALESCE(SUM(traffic_l7_tx), 0),
+			COALESCE(CAST(SUM(traffic_nic_rx) AS UNSIGNED), 0),
+			COALESCE(CAST(SUM(traffic_nic_tx) AS UNSIGNED), 0),
+			COALESCE(CAST(SUM(traffic_l7_rx) AS UNSIGNED), 0),
+			COALESCE(CAST(SUM(traffic_l7_tx) AS UNSIGNED), 0),
 			COALESCE(SUM(request_count), 0),
 			COALESCE(SUM(response_count), 0),
 			COALESCE(SUM(ip_count), 0)
@@ -1470,7 +1470,7 @@ func (store *serverTrafficStatsStore) LatestNicTxBandwidth(ctx context.Context, 
 	)
 	if err := row.Scan(&bucket, &bandwidthNicTx); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-				return 0, time.Time{}, errors.New("failed to load latest nic tx bandwidth")
+			return 0, time.Time{}, errors.New("failed to load latest nic tx bandwidth")
 		}
 		return 0, time.Time{}, errors.New("failed to load latest nic tx bandwidth")
 	}

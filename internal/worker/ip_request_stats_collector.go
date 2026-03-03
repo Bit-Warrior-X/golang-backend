@@ -1031,15 +1031,16 @@ func insertISPRequestBucket(ctx context.Context, dbConn *sql.DB, serverID int64,
 	}
 
 	valuePlaceholders := make([]string, 0, len(data.ISPRequestStats))
-	args := make([]any, 0, len(data.ISPRequestStats)*4)
+	args := make([]any, 0, len(data.ISPRequestStats)*5)
 
 	for _, row := range data.ISPRequestStats {
 		isp := strings.TrimSpace(row.ISP)
 		if isp == "" || row.RequestCount <= 0 {
 			continue
 		}
-		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, ?)")
-		args = append(args, serverID, bucket, isp, row.RequestCount)
+		// isp_hash is derived from request_isp using CRC32 to match schema.
+		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, CRC32(?), ?)")
+		args = append(args, serverID, bucket, isp, isp, row.RequestCount)
 	}
 
 	if len(valuePlaceholders) == 0 {
@@ -1047,7 +1048,7 @@ func insertISPRequestBucket(ctx context.Context, dbConn *sql.DB, serverID int64,
 	}
 
 	query := `
-		INSERT INTO isp_request_stats (server_id, bucket_ts, request_isp, request_count)
+		INSERT INTO isp_request_stats (server_id, bucket_ts, request_isp, isp_hash, request_count)
 		VALUES ` + strings.Join(valuePlaceholders, ",") + `
 		ON DUPLICATE KEY UPDATE
 			request_count = VALUES(request_count)`
@@ -1103,15 +1104,16 @@ func insertRefererRequestBucket(ctx context.Context, dbConn *sql.DB, serverID in
 	}
 
 	valuePlaceholders := make([]string, 0, len(data.RefererRequestStats))
-	args := make([]any, 0, len(data.RefererRequestStats)*4)
+	args := make([]any, 0, len(data.RefererRequestStats)*5)
 
 	for _, row := range data.RefererRequestStats {
 		ref := strings.TrimSpace(row.Referer)
 		if ref == "" || row.RequestCount <= 0 {
 			continue
 		}
-		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, ?)")
-		args = append(args, serverID, bucket, ref, row.RequestCount)
+		// referer_hash is derived from request_referer using CRC32.
+		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, CRC32(?), ?)")
+		args = append(args, serverID, bucket, ref, ref, row.RequestCount)
 	}
 
 	if len(valuePlaceholders) == 0 {
@@ -1119,7 +1121,7 @@ func insertRefererRequestBucket(ctx context.Context, dbConn *sql.DB, serverID in
 	}
 
 	query := `
-		INSERT INTO referer_request_stats (server_id, bucket_ts, request_referer, request_count)
+		INSERT INTO referer_request_stats (server_id, bucket_ts, request_referer, referer_hash, request_count)
 		VALUES ` + strings.Join(valuePlaceholders, ",") + `
 		ON DUPLICATE KEY UPDATE
 			request_count = VALUES(request_count)`
@@ -1137,15 +1139,16 @@ func insertURLRequestBucket(ctx context.Context, dbConn *sql.DB, serverID int64,
 	}
 
 	valuePlaceholders := make([]string, 0, len(data.URLRequestStats))
-	args := make([]any, 0, len(data.URLRequestStats)*4)
+	args := make([]any, 0, len(data.URLRequestStats)*5)
 
 	for _, row := range data.URLRequestStats {
 		url := strings.TrimSpace(row.URL)
 		if url == "" || row.RequestCount <= 0 {
 			continue
 		}
-		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, ?)")
-		args = append(args, serverID, bucket, url, row.RequestCount)
+		// url_hash is derived from request_url using CRC32.
+		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, CRC32(?), ?)")
+		args = append(args, serverID, bucket, url, url, row.RequestCount)
 	}
 
 	if len(valuePlaceholders) == 0 {
@@ -1153,7 +1156,7 @@ func insertURLRequestBucket(ctx context.Context, dbConn *sql.DB, serverID int64,
 	}
 
 	query := `
-		INSERT INTO url_request_stats (server_id, bucket_ts, request_url, request_count)
+		INSERT INTO url_request_stats (server_id, bucket_ts, request_url, url_hash, request_count)
 		VALUES ` + strings.Join(valuePlaceholders, ",") + `
 		ON DUPLICATE KEY UPDATE
 			request_count = VALUES(request_count)`
@@ -1171,15 +1174,16 @@ func insertUserAgentRequestBucket(ctx context.Context, dbConn *sql.DB, serverID 
 	}
 
 	valuePlaceholders := make([]string, 0, len(data.UserAgentRequestStats))
-	args := make([]any, 0, len(data.UserAgentRequestStats)*4)
+	args := make([]any, 0, len(data.UserAgentRequestStats)*5)
 
 	for _, row := range data.UserAgentRequestStats {
 		ua := strings.TrimSpace(row.UserAgent)
 		if ua == "" || row.RequestCount <= 0 {
 			continue
 		}
-		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, ?)")
-		args = append(args, serverID, bucket, ua, row.RequestCount)
+		// useragent_hash is derived from request_useragent using CRC32.
+		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, CRC32(?), ?)")
+		args = append(args, serverID, bucket, ua, ua, row.RequestCount)
 	}
 
 	if len(valuePlaceholders) == 0 {
@@ -1187,7 +1191,7 @@ func insertUserAgentRequestBucket(ctx context.Context, dbConn *sql.DB, serverID 
 	}
 
 	query := `
-		INSERT INTO useragent_request_stats (server_id, bucket_ts, request_useragent, request_count)
+		INSERT INTO useragent_request_stats (server_id, bucket_ts, request_useragent, useragent_hash, request_count)
 		VALUES ` + strings.Join(valuePlaceholders, ",") + `
 		ON DUPLICATE KEY UPDATE
 			request_count = VALUES(request_count)`
@@ -1198,8 +1202,14 @@ func insertUserAgentRequestBucket(ctx context.Context, dbConn *sql.DB, serverID 
 	}
 	return nil
 }
+func insertServerTrafficSnapshot(
+	ctx context.Context,
+	dbConn *sql.DB,
+	serverID int64,
+	bucket time.Time,
+	p serverTrafficStatsPayload,
+) error {
 
-func insertServerTrafficSnapshot(ctx context.Context, dbConn *sql.DB, serverID int64, bucket time.Time, p serverTrafficStatsPayload) error {
 	query := `
 		INSERT INTO server_traffic_stats (
 			server_id,
@@ -1255,6 +1265,8 @@ func insertServerTrafficSnapshot(ctx context.Context, dbConn *sql.DB, serverID i
 			traffic_l7_tx = VALUES(traffic_l7_tx),
 			bandwidth_nic_rx = VALUES(bandwidth_nic_rx),
 			bandwidth_nic_tx = VALUES(bandwidth_nic_tx),
+			bandwidth_l7_rx = VALUES(bandwidth_l7_rx),
+			bandwidth_l7_tx = VALUES(bandwidth_l7_tx),
 			request_count = VALUES(request_count),
 			response_count = VALUES(response_count),
 			blocked_request_count = VALUES(blocked_request_count),
@@ -1295,14 +1307,14 @@ func insertServerTrafficSnapshot(ctx context.Context, dbConn *sql.DB, serverID i
 		query,
 		serverID,
 		bucket,
-		p.TrafficNicRx,
-		p.TrafficNicTx,
-		p.TrafficL7Rx,
-		p.TrafficL7Tx,
-		p.BandwidthNicRx,
-		p.BandwidthNicTx,
-		p.BandwidthL7Rx,
-		p.BandwidthL7Tx,
+		p.TrafficNicRx/1024,
+		p.TrafficNicTx/1024,
+		p.TrafficL7Rx/1024,
+		p.TrafficL7Tx/1024,
+		p.BandwidthNicRx/1024,
+		p.BandwidthNicTx/1024,
+		p.BandwidthL7Rx/1024,
+		p.BandwidthL7Tx/1024,
 		p.RequestCount,
 		p.ResponseCount,
 		p.BlockedRequestCount,
@@ -1340,6 +1352,7 @@ func insertServerTrafficSnapshot(ctx context.Context, dbConn *sql.DB, serverID i
 	if err != nil {
 		return fmt.Errorf("insert server_traffic_stats: %w", err)
 	}
+
 	return nil
 }
 
