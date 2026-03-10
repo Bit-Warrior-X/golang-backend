@@ -159,8 +159,8 @@ func registerRoutes(
 	mux.HandleFunc("/api/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
 	mux.HandleFunc("/api/v1/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
 	mux.HandleFunc("/servers", serversHandler(servers))
-	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(blacklist))
-	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(blacklist))
+	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(servers, blacklist))
+	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(servers, blacklist))
 	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
@@ -2264,7 +2264,7 @@ type l4WhitelistPayload struct {
 	Reason    string `json:"reason"`
 }
 
-func serverBlacklistHandler(blacklist store.BlacklistStore) http.HandlerFunc {
+func serverBlacklistHandler(servers store.ServerStore, blacklist store.BlacklistStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/servers/blacklist")
 		if path == "" || path == "/" {
@@ -2349,7 +2349,7 @@ func serverBlacklistHandler(blacklist store.BlacklistStore) http.HandlerFunc {
 				}
 				// After flushing the temporary blacklist for a server, notify api_parser.
 				if serverID > 0 {
-					if err := callL7UpdateTemporaryBlacklist(r.Context(), serverID, blacklist); err != nil {
+					if err := callL7UpdateTemporaryBlacklist(r.Context(), servers, serverID, blacklist); err != nil {
 						writeError(w, http.StatusBadGateway, "failed to sync temporary blacklist")
 						return
 					}
@@ -2401,7 +2401,7 @@ func serverBlacklistHandler(blacklist store.BlacklistStore) http.HandlerFunc {
 		}
 		// After deleting a single temporary blacklist entry, notify api_parser.
 		if serverID > 0 {
-			if err := callL7UpdateTemporaryBlacklist(r.Context(), serverID, blacklist); err != nil {
+			if err := callL7UpdateTemporaryBlacklist(r.Context(), servers, serverID, blacklist); err != nil {
 				writeError(w, http.StatusBadGateway, "failed to sync temporary blacklist")
 				return
 			}
@@ -2461,10 +2461,6 @@ type l7WhitelistUpdatePayload struct {
 	Rules    []store.WafWhitelistRule `json:"rules"`
 }
 
-// l7WhitelistUpdateURL is the api_parser endpoint that receives full L7
-// whitelist data whenever rules change.
-const l7WhitelistUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_whitelist"
-
 // callL7UpdateWhitelist loads all WAF whitelist rules for the given server and
 // sends them to api_parser via the l7_update_whitelist API using POST.
 func callL7UpdateWhitelist(ctx context.Context, servers store.ServerStore, serverID int64, wafWhitelist store.WafWhitelistStore) error {
@@ -2493,6 +2489,7 @@ func callL7UpdateWhitelist(ctx context.Context, servers store.ServerStore, serve
 		return fmt.Errorf("encode l7 whitelist payload: %w", err)
 	}
 
+	l7WhitelistUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_whitelist"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7WhitelistUpdateURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build l7_update_whitelist request: %w", err)
@@ -2520,10 +2517,6 @@ type l7BlacklistUpdatePayload struct {
 	ServerIP string                   `json:"serverIp"`
 	Rules    []store.WafBlacklistRule `json:"rules"`
 }
-
-// l7BlacklistUpdateURL is the api_parser endpoint that receives full L7
-// blacklist data whenever rules change.
-const l7BlacklistUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_blacklist"
 
 // callL7UpdateBlacklist loads all WAF blacklist rules for the given server and
 // sends them to api_parser via the l7_update_blacklist API using POST.
@@ -2553,6 +2546,7 @@ func callL7UpdateBlacklist(ctx context.Context, servers store.ServerStore, serve
 		return fmt.Errorf("encode l7 blacklist payload: %w", err)
 	}
 
+	l7BlacklistUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_blacklist"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7BlacklistUpdateURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build l7_update_blacklist request: %w", err)
@@ -2580,10 +2574,6 @@ type l7GeoUpdatePayload struct {
 	ServerIP string             `json:"serverIp"`
 	Rules    []store.WafGeoRule `json:"rules"`
 }
-
-// l7GeoUpdateURL is the api_parser endpoint that receives full L7 GEO data
-// whenever rules change.
-const l7GeoUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_geo"
 
 // callL7UpdateGeo loads all WAF GEO rules for the given server, filters to
 // enabled ones only, normalizes behavior for WHITE operation, and sends them
@@ -2627,6 +2617,7 @@ func callL7UpdateGeo(ctx context.Context, servers store.ServerStore, serverID in
 		return fmt.Errorf("encode l7 geo payload: %w", err)
 	}
 
+	l7GeoUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_geo"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7GeoUpdateURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build l7_update_geo request: %w", err)
@@ -2654,10 +2645,6 @@ type l7AntiHeaderUpdatePayload struct {
 	ServerIP string                    `json:"serverIp"`
 	Rules    []store.WafAntiHeaderRule `json:"rules"`
 }
-
-// l7AntiHeaderUpdateURL is the api_parser endpoint that receives full L7
-// anti-header data whenever rules change.
-const l7AntiHeaderUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_antiheader"
 
 // callL7UpdateAntiHeader loads all WAF anti-header rules for the given server,
 // filters to enabled ones only, and sends them to api_parser via the
@@ -2697,6 +2684,7 @@ func callL7UpdateAntiHeader(ctx context.Context, servers store.ServerStore, serv
 		return fmt.Errorf("encode l7 anti-header payload: %w", err)
 	}
 
+	l7AntiHeaderUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_antiheader"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7AntiHeaderUpdateURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build l7_update_antiheader request: %w", err)
@@ -2736,10 +2724,6 @@ type intervalFreqLimitRulePayload struct {
 	Behavior     string `json:"behavior"`
 	Status       string `json:"status"`
 }
-
-// l7IntervalFreqLimitUpdateURL is the api_parser endpoint that receives L7
-// interval frequency limit data whenever rules change.
-const l7IntervalFreqLimitUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_intervalfreqlimit"
 
 // callL7UpdateIntervalFreqLimit loads all WAF interval frequency limit rules
 // for the given server, filters to enabled ones only, and sends them to
@@ -2786,6 +2770,7 @@ func callL7UpdateIntervalFreqLimit(ctx context.Context, servers store.ServerStor
 		return fmt.Errorf("encode l7 intervalfreqlimit payload: %w", err)
 	}
 
+	l7IntervalFreqLimitUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_intervalfreqlimit"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7IntervalFreqLimitUpdateURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build l7_update_intervalfreqlimit request: %w", err)
@@ -2825,10 +2810,6 @@ type secondFreqLimitRulePayload struct {
 	Behavior     string `json:"behavior"`
 	Status       string `json:"status"`
 }
-
-// l7SecondFreqLimitUpdateURL is the api_parser endpoint that receives L7
-// second frequency limit data whenever rules change.
-const l7SecondFreqLimitUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_secondfreqlimit"
 
 // callL7UpdateSecondFreqLimit loads all WAF second frequency limit rules
 // for the given server, filters to enabled ones only, and sends them to
@@ -2875,6 +2856,7 @@ func callL7UpdateSecondFreqLimit(ctx context.Context, servers store.ServerStore,
 		return fmt.Errorf("encode l7 secondfreqlimit payload: %w", err)
 	}
 
+	l7SecondFreqLimitUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_secondfreqlimit"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7SecondFreqLimitUpdateURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build l7_update_secondfreqlimit request: %w", err)
@@ -2915,16 +2897,17 @@ type l7TemporaryBlacklistUpdateEntry struct {
 	TriggerRule string `json:"trigger_rule"`
 }
 
-// l7TemporaryBlacklistUpdateURL is the api_parser endpoint that receives full
-// temporary blacklist data whenever entries change.
-const l7TemporaryBlacklistUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_temporaryblacklist"
-
 // callL7UpdateTemporaryBlacklist loads all temporary blacklist payloads for the
 // given server and sends them to api_parser via the l7_update_temporaryblacklist
 // API using POST.
-func callL7UpdateTemporaryBlacklist(ctx context.Context, serverID int64, blacklist store.BlacklistStore) error {
+func callL7UpdateTemporaryBlacklist(ctx context.Context, servers store.ServerStore, serverID int64, blacklist store.BlacklistStore) error {
 	if serverID == 0 {
 		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
 	}
 
 	payloads, err := blacklist.ListPayloadsByServer(ctx, serverID)
@@ -2953,6 +2936,7 @@ func callL7UpdateTemporaryBlacklist(ctx context.Context, serverID int64, blackli
 		return fmt.Errorf("encode l7 temporary blacklist payload: %w", err)
 	}
 
+	l7TemporaryBlacklistUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_temporaryblacklist"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7TemporaryBlacklistUpdateURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build l7_update_temporaryblacklist request: %w", err)
@@ -2993,10 +2977,6 @@ type responseFreqRulePayload struct {
 	Behavior      string `json:"behavior"`
 	Status        string `json:"status"`
 }
-
-// l7ResponseFreqUpdateURL is the api_parser endpoint that receives L7
-// response frequency data whenever rules change.
-const l7ResponseFreqUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_responsefreq"
 
 // callL7UpdateResponseFreq loads all WAF response frequency rules for the
 // given server, filters to enabled ones only, and sends them to api_parser
@@ -3044,6 +3024,7 @@ func callL7UpdateResponseFreq(ctx context.Context, servers store.ServerStore, se
 		return fmt.Errorf("encode l7 responsefreq payload: %w", err)
 	}
 
+	l7ResponseFreqUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_responsefreq"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7ResponseFreqUpdateURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build l7_update_responsefreq request: %w", err)
@@ -3083,10 +3064,6 @@ type userAgentRulePayload struct {
 	Behavior  string `json:"behavior"`
 	Status    string `json:"status"`
 }
-
-// l7UserAgentUpdateURL is the api_parser endpoint that receives L7 user agent
-// data whenever rules change.
-const l7UserAgentUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_useragent"
 
 // callL7UpdateUserAgent loads all WAF user agent rules for the given server,
 // filters to enabled ones only, and sends them to api_parser via the
@@ -3133,6 +3110,7 @@ func callL7UpdateUserAgent(ctx context.Context, servers store.ServerStore, serve
 		return fmt.Errorf("encode l7 useragent payload: %w", err)
 	}
 
+	l7UserAgentUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_useragent"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7UserAgentUpdateURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build l7_update_useragent request: %w", err)
@@ -3168,14 +3146,16 @@ type upstreamServerPayloadL7 struct {
 	Description string `json:"description"`
 }
 
-// l7UpstreamServersUpdateURL is the api_parser endpoint for upstream servers.
-const l7UpstreamServersUpdateURL = "http://127.0.0.1:5000/API/L7/l7_update_upstreamservers"
-
 // callL7UpdateUpstreamServers loads all upstream servers for the given server
 // and sends them to api_parser via the l7_update_upstreamservers API using POST.
-func callL7UpdateUpstreamServers(ctx context.Context, serverID int64, upstreamServers store.UpstreamServerStore) error {
+func callL7UpdateUpstreamServers(ctx context.Context, servers store.ServerStore, serverID int64, upstreamServers store.UpstreamServerStore) error {
 	if serverID == 0 {
 		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
 	}
 
 	list, err := upstreamServers.ListByServer(ctx, serverID)
@@ -3203,6 +3183,7 @@ func callL7UpdateUpstreamServers(ctx context.Context, serverID int64, upstreamSe
 		return fmt.Errorf("encode l7 upstreamservers payload: %w", err)
 	}
 
+	l7UpstreamServersUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_upstreamservers"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7UpstreamServersUpdateURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build l7_update_upstreamservers request: %w", err)
@@ -4834,7 +4815,7 @@ func serverDetailHandler(
 						writeError(w, http.StatusInternalServerError, "failed to delete upstream servers")
 						return
 					}
-					if err := callL7UpdateUpstreamServers(r.Context(), serverID, upstreamServers); err != nil {
+					if err := callL7UpdateUpstreamServers(r.Context(), servers, serverID, upstreamServers); err != nil {
 						writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
 						return
 					}
@@ -4859,7 +4840,7 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to create upstream server")
 					return
 				}
-				if err := callL7UpdateUpstreamServers(r.Context(), serverID, upstreamServers); err != nil {
+				if err := callL7UpdateUpstreamServers(r.Context(), servers, serverID, upstreamServers); err != nil {
 					writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
 					return
 				}
@@ -4887,7 +4868,7 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to update upstream server")
 					return
 				}
-				if err := callL7UpdateUpstreamServers(r.Context(), serverID, upstreamServers); err != nil {
+				if err := callL7UpdateUpstreamServers(r.Context(), servers, serverID, upstreamServers); err != nil {
 					writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
 					return
 				}
@@ -4901,7 +4882,7 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to delete upstream server")
 					return
 				}
-				if err := callL7UpdateUpstreamServers(r.Context(), serverID, upstreamServers); err != nil {
+				if err := callL7UpdateUpstreamServers(r.Context(), servers, serverID, upstreamServers); err != nil {
 					writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
 					return
 				}
