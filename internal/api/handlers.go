@@ -360,13 +360,14 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/get_blocklist_ips", getBlocklistIPsHandler(servers, l4Blacklist))
 	mux.HandleFunc("/api/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
 	mux.HandleFunc("/api/v1/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
+	mux.HandleFunc("/api/v1/deploy-versions", deployLicenseVersionsHandler(cfg))
 	mux.HandleFunc("/servers", serversHandler(cfg, servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(servers, blacklist))
 	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(servers, blacklist))
 	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
-	mux.HandleFunc("/servers/", serverDetailHandler(agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers))
+	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -2507,6 +2508,221 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 	return decoded, nil
 }
 
+type deployLicenseVersionItem struct {
+	UUID     string `json:"uuid"`
+	Version  string `json:"version"`
+	FullName string `json:"full_name"`
+	Path     string `json:"path,omitempty"`
+	Updated  any    `json:"updated,omitempty"`
+}
+
+type deployLicenseVersionsEnvelope struct {
+	Versions []deployLicenseVersionItem `json:"versions"`
+}
+
+func fetchDeployLicenseVersions(ctx context.Context, cfg config.Config) (deployLicenseVersionsEnvelope, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.DeployLicenseBaseURL), "/")
+	if baseURL == "" {
+		logDeployLicenseClientf("abort: DEPLOY_LICENSE_BASE_URL is empty (get_versions)")
+		return deployLicenseVersionsEnvelope{}, errors.New("deploy license base url is not configured")
+	}
+	if _, err := url.ParseRequestURI(baseURL); err != nil {
+		logDeployLicenseClientf("abort: invalid base URL (get_versions) err=%v", err)
+		return deployLicenseVersionsEnvelope{}, errors.New("deploy license base url is invalid")
+	}
+	timeout := cfg.DeployLicenseTimeoutSeconds
+	if timeout <= 0 {
+		timeout = 900
+	}
+	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	target := baseURL + "/get_versions"
+	logDeployLicenseClientf("GET %s timeout=%ds", target, timeout)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return deployLicenseVersionsEnvelope{}, fmt.Errorf("build get_versions request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		logDeployLicenseClientf("get_versions HTTP error: %v", err)
+		return deployLicenseVersionsEnvelope{}, fmt.Errorf("get_versions request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return deployLicenseVersionsEnvelope{}, fmt.Errorf("read get_versions response: %w", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		logDeployLicenseClientf("get_versions status=%d body=%q", resp.StatusCode, oneLineLogPreview(string(body), 400))
+		return deployLicenseVersionsEnvelope{}, fmt.Errorf("get_versions failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var decoded deployLicenseVersionsEnvelope
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		logDeployLicenseClientf("get_versions JSON decode failed: %v", err)
+		return deployLicenseVersionsEnvelope{}, fmt.Errorf("decode get_versions response: %w", err)
+	}
+	logDeployLicenseClientf("get_versions OK count=%d", len(decoded.Versions))
+	return decoded, nil
+}
+
+func deployLicenseVersionsHandler(cfg config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		out, err := fetchDeployLicenseVersions(r.Context(), cfg)
+		if err != nil {
+			log.Printf("[api] GET /api/v1/deploy-versions: %v", err)
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+type deployUpgradeVersionRequest struct {
+	Name        string `json:"name"`
+	IP          string `json:"ip"`
+	User        string `json:"user"`
+	Pass        string `json:"pass"`
+	SSHPort     string `json:"ssh_port"`
+	Token       string `json:"token"`
+	VersionUUID string `json:"version_uuid"`
+	LicenseType string `json:"license_type,omitempty"`
+}
+
+func deployLicenseUpgradeVersion(ctx context.Context, cfg config.Config, view store.ServerView, versionUUID string) (deployCreateServerResponse, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.DeployLicenseBaseURL), "/")
+	if baseURL == "" {
+		logDeployLicenseClientf("abort: DEPLOY_LICENSE_BASE_URL is empty (upgrade_version)")
+		return deployCreateServerResponse{}, errors.New("deploy license base url is not configured")
+	}
+	if _, err := url.ParseRequestURI(baseURL); err != nil {
+		logDeployLicenseClientf("abort: invalid base URL (upgrade_version) err=%v", err)
+		return deployCreateServerResponse{}, errors.New("deploy license base url is invalid")
+	}
+	reqPayload := deployUpgradeVersionRequest{
+		Name:        strings.TrimSpace(view.Name),
+		IP:          strings.TrimSpace(view.IP),
+		User:        strings.TrimSpace(view.SSHUser),
+		Pass:        strings.TrimSpace(view.SSHPassword),
+		SSHPort:     strings.TrimSpace(view.SSHPort),
+		Token:       strings.TrimSpace(view.Token),
+		VersionUUID: strings.TrimSpace(versionUUID),
+		LicenseType: deployLicenseServiceLicenseType(view.License),
+	}
+	body, err := json.Marshal(reqPayload)
+	if err != nil {
+		return deployCreateServerResponse{}, fmt.Errorf("encode upgrade_version request: %w", err)
+	}
+	timeout := cfg.DeployLicenseTimeoutSeconds
+	if timeout <= 0 {
+		timeout = 900
+	}
+	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	target := baseURL + "/upgrade_version"
+	logDeployLicenseClientf("POST %s timeout=%ds serverID payload name=%q ip=%q version_uuid_len=%d",
+		target, timeout, reqPayload.Name, reqPayload.IP, len(reqPayload.VersionUUID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		return deployCreateServerResponse{}, fmt.Errorf("build upgrade_version request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		logDeployLicenseClientf("upgrade_version HTTP error: %v", err)
+		return deployCreateServerResponse{}, fmt.Errorf("upgrade_version request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	limitedBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return deployCreateServerResponse{}, fmt.Errorf("read upgrade_version response: %w", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return deployCreateServerResponse{}, fmt.Errorf("upgrade_version failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(limitedBody)))
+	}
+	var decoded deployCreateServerResponse
+	if err := json.Unmarshal(limitedBody, &decoded); err != nil {
+		return deployCreateServerResponse{}, fmt.Errorf("decode upgrade_version response: %w", err)
+	}
+	normalizeDeployLicenseCreateResponse(&decoded)
+	return decoded, nil
+}
+
+type serverUpgradeRequestBody struct {
+	VersionUUID string `json:"versionUuid"`
+}
+
+func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Config, servers store.ServerStore, serverID int64) {
+	var body serverUpgradeRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	versionUUID := strings.TrimSpace(body.VersionUUID)
+	if versionUUID == "" {
+		writeError(w, http.StatusBadRequest, "versionUuid is required")
+		return
+	}
+	view, err := servers.GetView(r.Context(), serverID)
+	if err != nil {
+		if store.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "server not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load server")
+		return
+	}
+	if strings.TrimSpace(view.Token) == "" {
+		writeError(w, http.StatusBadRequest, "server has no deployment token")
+		return
+	}
+	deployTimeout := cfg.DeployLicenseTimeoutSeconds
+	if deployTimeout <= 0 {
+		deployTimeout = 900
+	}
+	deployCtx, cancelDeploy := context.WithTimeout(r.Context(), time.Duration(deployTimeout)*time.Second)
+	defer cancelDeploy()
+	deployResp, err := deployLicenseUpgradeVersion(deployCtx, cfg, view, versionUUID)
+	if err != nil {
+		log.Printf("[api] POST /servers/%d/upgrade: deploy_license failed: %v", serverID, err)
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	expireRaw := strings.TrimSpace(deployResp.DeployComplete.ExpireDate)
+	if expireRaw == "" {
+		expireRaw = strings.TrimSpace(deployResp.ExpireDate)
+	}
+	expiredAt, err := parseDeployExpireDate(expireRaw)
+	if err != nil {
+		log.Printf("[api] POST /servers/%d/upgrade: invalid expire_date raw=%q err=%v", serverID, expireRaw, err)
+		writeError(w, http.StatusBadGateway, "deploy license returned invalid expire_date")
+		return
+	}
+	deployServiceStatus := strings.TrimSpace(deployResp.DeployComplete.ServerStatus)
+	if deployServiceStatus == "" {
+		deployServiceStatus = strings.TrimSpace(deployResp.ServerStatus)
+	}
+	deployVersion := strings.TrimSpace(deployResp.DeployComplete.Version)
+	if deployVersion == "" {
+		deployVersion = strings.TrimSpace(deployResp.Version)
+	}
+	storedLicenseType := storeLicenseTypeFromDeployResponse(deployResp, view.License)
+	tok := strings.TrimSpace(view.Token)
+	if err := servers.UpdateDeploymentData(r.Context(), serverID, tok, "", storedLicenseType, deployVersion, expiredAt, deployServiceStatus); err != nil {
+		log.Printf("[api] POST /servers/%d/upgrade: UpdateDeploymentData failed: %v", serverID, err)
+		writeError(w, http.StatusInternalServerError, "failed to persist upgrade result")
+		return
+	}
+	outView, err := servers.GetView(r.Context(), serverID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load server")
+		return
+	}
+	log.Printf("[api] POST /servers/%d/upgrade: success version=%q service_status=%q", serverID, outView.Version, outView.ServiceStatus)
+	writeJSON(w, http.StatusOK, outView)
+}
+
 func parseDeployExpireDate(raw string) (*time.Time, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -3621,6 +3837,7 @@ func callL7UpdateUpstreamServers(ctx context.Context, servers store.ServerStore,
 }
 
 func serverDetailHandler(
+	cfg config.Config,
 	agentClient *AgentClient,
 	servers store.ServerStore,
 	l4 store.L4Store,
@@ -3638,6 +3855,20 @@ func serverDetailHandler(
 	upstreamServers store.UpstreamServerStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/upgrade") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/upgrade")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			handleServerUpgrade(w, r, cfg, servers, serverID)
+			return
+		}
+
 		if strings.HasSuffix(r.URL.Path, "/access-log/stream") {
 			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/access-log/stream")
 			if !ok {
