@@ -70,15 +70,37 @@ func (c corsConfig) isAllowed(origin string) bool {
 	return ok
 }
 
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.status == 0 {
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
 func withRequestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
+		rec := &statusRecorder{ResponseWriter: w, status: 0}
+		next.ServeHTTP(rec, r)
 		duration := time.Since(start).Truncate(time.Millisecond)
 		path := r.URL.Path
 		if strings.TrimSpace(path) == "" {
 			path = "/"
 		}
-		log.Printf("%s %s (%s)", r.Method, path, duration)
+		status := rec.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		remote := strings.TrimSpace(r.RemoteAddr)
+		if remote != "" {
+			log.Printf("%s %s -> %d (%s) remote=%s", r.Method, path, status, duration, remote)
+			return
+		}
+		log.Printf("%s %s -> %d (%s)", r.Method, path, status, duration)
 	})
 }

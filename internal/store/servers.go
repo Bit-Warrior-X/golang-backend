@@ -12,19 +12,20 @@ import (
 )
 
 type Server struct {
-	ID          int64
-	Name        string
-	IP          string
-	Status      string
-	LicenseType string
-	LicenseFile string
-	Version     string
-	SSHUser     string
-	SSHPassword string
-	SSHPort     string
-	Token       string
-	Created     sql.NullTime
-	Expired     sql.NullTime
+	ID             int64
+	Name           string
+	IP             string
+	Status         string
+	ServiceStatus  string
+	LicenseType    string
+	LicenseFile    string
+	Version        string
+	SSHUser        string
+	SSHPassword    string
+	SSHPort        string
+	Token          string
+	Created        sql.NullTime
+	Expired        sql.NullTime
 }
 
 type ServerView struct {
@@ -32,6 +33,7 @@ type ServerView struct {
 	Name           string   `json:"name"`
 	IP             string   `json:"ip"`
 	Status         string   `json:"status"`
+	ServiceStatus  string   `json:"serviceStatus,omitempty"`
 	StatusLabel    string   `json:"statusLabel"`
 	StatusClass    string   `json:"statusClass"`
 	License        string   `json:"license"`
@@ -49,16 +51,18 @@ type ServerView struct {
 }
 
 type ServerInput struct {
-	Name        string
-	IP          string
-	Status      string
-	LicenseType string
-	LicenseFile string
-	Version     string
-	SSHUser     string
-	SSHPassword string
-	SSHPort     string
-	Expired     *time.Time
+	Name           string
+	IP             string
+	Status         string
+	ServiceStatus  string
+	LicenseType    string
+	LicenseFile    string
+	Version        string
+	SSHUser        string
+	SSHPassword    string
+	SSHPort        string
+	Token          string
+	Expired        *time.Time
 }
 
 type ServerStore interface {
@@ -69,6 +73,7 @@ type ServerStore interface {
 	Create(ctx context.Context, input ServerInput) (Server, error)
 	GetView(ctx context.Context, serverID int64) (ServerView, error)
 	GetByToken(ctx context.Context, token string) (Server, error)
+	UpdateDeploymentData(ctx context.Context, serverID int64, token, rowStatus, licenseType, version string, expired *time.Time, serviceStatus string) error
 	Update(ctx context.Context, serverID int64, input ServerInput) error
 	Delete(ctx context.Context, serverID int64) error
 }
@@ -108,13 +113,15 @@ func (store *serverStore) ListWithUsers(ctx context.Context) ([]ServerView, erro
 		}
 		sort.Strings(names)
 
-		statusLabel, statusClass := normalizeStatus(server.Status)
+		pillSource := serverPillDisplayStatus(server)
+		statusLabel, statusClass := normalizeStatus(pillSource)
 
 		views = append(views, ServerView{
 			ID:             server.ID,
 			Name:           server.Name,
 			IP:             server.IP,
 			Status:         server.Status,
+			ServiceStatus:  server.ServiceStatus,
 			StatusLabel:    statusLabel,
 			StatusClass:    statusClass,
 			License:        server.LicenseType,
@@ -162,6 +169,12 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 	if licenseType == "" {
 		licenseType = "Trial"
 	}
+	serviceStatus := strings.TrimSpace(input.ServiceStatus)
+	versionTrim := strings.TrimSpace(input.Version)
+	var versionInsert any
+	if versionTrim != "" {
+		versionInsert = versionTrim
+	}
 
 	var expired sql.NullTime
 	if input.Expired != nil {
@@ -169,17 +182,19 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 	}
 
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO servers (name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, created, expired)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO servers (name, ip, status, service_status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullableServerString(input.Name),
 		nullableServerString(input.IP),
 		status,
+		nullableServerString(serviceStatus),
 		licenseType,
 		nullableServerString(input.LicenseFile),
-		nullableServerString(input.Version),
+		versionInsert,
 		nullableServerString(input.SSHUser),
 		nullableServerString(input.SSHPassword),
 		nullableServerInt(input.SSHPort),
+		nullableServerString(input.Token),
 		now,
 		expired,
 	)
@@ -193,19 +208,47 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 	}
 
 	return Server{
-		ID:          id,
-		Name:        input.Name,
-		IP:          input.IP,
-		Status:      status,
-		LicenseType: licenseType,
-		LicenseFile: input.LicenseFile,
-		Version:     input.Version,
-		SSHUser:     input.SSHUser,
-		SSHPassword: input.SSHPassword,
-		SSHPort:     input.SSHPort,
-		Created:     sql.NullTime{Time: now, Valid: true},
-		Expired:     expired,
+		ID:             id,
+		Name:           input.Name,
+		IP:             input.IP,
+		Status:         status,
+		ServiceStatus:  serviceStatus,
+		LicenseType:    licenseType,
+		LicenseFile:    input.LicenseFile,
+		Version:        versionTrim,
+		SSHUser:        input.SSHUser,
+		SSHPassword:    input.SSHPassword,
+		SSHPort:        input.SSHPort,
+		Token:          input.Token,
+		Created:        sql.NullTime{Time: now, Valid: true},
+		Expired:        expired,
 	}, nil
+}
+
+func (store *serverStore) UpdateDeploymentData(ctx context.Context, serverID int64, token, rowStatus, licenseType, version string, expired *time.Time, serviceStatus string) error {
+	var expiredValue sql.NullTime
+	if expired != nil {
+		expiredValue = sql.NullTime{Time: *expired, Valid: true}
+	}
+
+	_, err := store.db.ExecContext(ctx, `
+		UPDATE servers
+		SET token = ?,
+			status = COALESCE(NULLIF(?, ''), status),
+			service_status = COALESCE(NULLIF(?, ''), service_status),
+			license_type = COALESCE(NULLIF(?, ''), license_type),
+			version = COALESCE(NULLIF(?, ''), version),
+			expired = COALESCE(?, expired)
+		WHERE id = ?`,
+		nullableServerString(token),
+		strings.TrimSpace(rowStatus),
+		strings.TrimSpace(serviceStatus),
+		strings.TrimSpace(licenseType),
+		strings.TrimSpace(version),
+		expiredValue,
+		serverID,
+	)
+	return err
 }
 
 func (store *serverStore) Update(ctx context.Context, serverID int64, input ServerInput) error {
@@ -254,13 +297,15 @@ func (store *serverStore) GetView(ctx context.Context, serverID int64) (ServerVi
 	}
 	sort.Strings(names)
 
-	statusLabel, statusClass := normalizeStatus(server.Status)
+	pillSource := serverPillDisplayStatus(server)
+	statusLabel, statusClass := normalizeStatus(pillSource)
 
 	return ServerView{
 		ID:             server.ID,
 		Name:           server.Name,
 		IP:             server.IP,
 		Status:         server.Status,
+		ServiceStatus:  server.ServiceStatus,
 		StatusLabel:    statusLabel,
 		StatusClass:    statusClass,
 		License:        server.LicenseType,
@@ -312,7 +357,7 @@ func (store *serverStore) UpdateServerUsers(ctx context.Context, serverID int64,
 
 func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
+		SELECT id, name, ip, status, service_status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
 		FROM servers
 		ORDER BY id DESC`)
 	if err != nil {
@@ -326,6 +371,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 		var name sql.NullString
 		var ip sql.NullString
 		var status sql.NullString
+		var serviceStatus sql.NullString
 		var licenseType sql.NullString
 		var licenseFile sql.NullString
 		var version sql.NullString
@@ -338,6 +384,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 			&name,
 			&ip,
 			&status,
+			&serviceStatus,
 			&licenseType,
 			&licenseFile,
 			&version,
@@ -353,6 +400,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 		item.Name = nullStringValue(name)
 		item.IP = nullStringValue(ip)
 		item.Status = nullStringValue(status)
+		item.ServiceStatus = nullStringValue(serviceStatus)
 		item.LicenseType = nullStringValue(licenseType)
 		item.LicenseFile = nullStringValue(licenseFile)
 		item.Version = nullStringValue(version)
@@ -370,7 +418,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 
 func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
+		SELECT id, name, ip, status, service_status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
 		FROM servers
 		WHERE id = ?`, serverID)
 
@@ -378,6 +426,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 	var name sql.NullString
 	var ip sql.NullString
 	var status sql.NullString
+	var serviceStatus sql.NullString
 	var licenseType sql.NullString
 	var licenseFile sql.NullString
 	var version sql.NullString
@@ -390,6 +439,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 		&name,
 		&ip,
 		&status,
+		&serviceStatus,
 		&licenseType,
 		&licenseFile,
 		&version,
@@ -406,6 +456,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 	item.Name = nullStringValue(name)
 	item.IP = nullStringValue(ip)
 	item.Status = nullStringValue(status)
+	item.ServiceStatus = nullStringValue(serviceStatus)
 	item.LicenseType = nullStringValue(licenseType)
 	item.LicenseFile = nullStringValue(licenseFile)
 	item.Version = nullStringValue(version)
@@ -418,7 +469,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 
 func (store *serverStore) GetByToken(ctx context.Context, token string) (Server, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, name, ip, status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
+		SELECT id, name, ip, status, service_status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
 		FROM servers
 		WHERE token = ?`, token)
 
@@ -426,6 +477,7 @@ func (store *serverStore) GetByToken(ctx context.Context, token string) (Server,
 	var name sql.NullString
 	var ip sql.NullString
 	var status sql.NullString
+	var serviceStatus sql.NullString
 	var licenseType sql.NullString
 	var licenseFile sql.NullString
 	var version sql.NullString
@@ -438,6 +490,7 @@ func (store *serverStore) GetByToken(ctx context.Context, token string) (Server,
 		&name,
 		&ip,
 		&status,
+		&serviceStatus,
 		&licenseType,
 		&licenseFile,
 		&version,
@@ -457,6 +510,7 @@ func (store *serverStore) GetByToken(ctx context.Context, token string) (Server,
 	item.Name = nullStringValue(name)
 	item.IP = nullStringValue(ip)
 	item.Status = nullStringValue(status)
+	item.ServiceStatus = nullStringValue(serviceStatus)
 	item.LicenseType = nullStringValue(licenseType)
 	item.LicenseFile = nullStringValue(licenseFile)
 	item.Version = nullStringValue(version)
@@ -542,6 +596,14 @@ func formatTimestamp(value sql.NullTime) string {
 	return value.Time.UTC().Format(time.RFC3339)
 }
 
+// serverPillDisplayStatus prefers deploy/runtime service_status when set; otherwise the row status ENUM.
+func serverPillDisplayStatus(s Server) string {
+	if v := strings.TrimSpace(s.ServiceStatus); v != "" {
+		return v
+	}
+	return strings.TrimSpace(s.Status)
+}
+
 func normalizeStatus(status string) (string, string) {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "normal":
@@ -550,6 +612,12 @@ func normalizeStatus(status string) (string, string) {
 		return "Pause", "inactive"
 	case "expired":
 		return "Expired", "maintenance"
+	case "running":
+		return "Running", "running"
+	case "deployed":
+		return "Deployed", "deployed"
+	case "stopped":
+		return "Stopped", "stopped"
 	default:
 		return status, "inactive"
 	}

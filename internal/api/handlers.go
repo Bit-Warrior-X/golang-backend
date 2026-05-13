@@ -3,17 +3,25 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"vue-project-backend/internal/config"
 	"vue-project-backend/internal/store"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type loginRequest struct {
@@ -38,8 +46,202 @@ type errorResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
+var serverCreateSingleflight singleflight.Group
+
+const recentServerCreateTTL = 2 * time.Minute
+
+var (
+	recentServerCreateMu sync.Mutex
+	recentServerCreates  = map[string]recentServerCreateEntry{}
+)
+
+type recentServerCreateEntry struct {
+	serverID int64
+	created  time.Time
+}
+
+func serverCreateDedupeKey(payload serverCreatePayload) string {
+	ids := append([]int64(nil), payload.UserIDs...)
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var b strings.Builder
+	b.WriteString(strings.ToLower(strings.TrimSpace(payload.Name)))
+	b.WriteByte('|')
+	b.WriteString(strings.TrimSpace(payload.IP))
+	b.WriteByte('|')
+	b.WriteString(strings.TrimSpace(payload.SSHUser))
+	b.WriteByte('|')
+	b.WriteString(strings.TrimSpace(payload.SSHPort))
+	b.WriteByte('|')
+	b.WriteString(strings.ToLower(strings.TrimSpace(payload.LicenseType)))
+	b.WriteByte('|')
+	b.WriteString(strings.TrimSpace(payload.LicenseFile))
+	b.WriteByte('|')
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "%d", id)
+	}
+	return b.String()
+}
+
+func pruneRecentServerCreatesUnlocked() {
+	now := time.Now()
+	for k, e := range recentServerCreates {
+		if now.Sub(e.created) > recentServerCreateTTL {
+			delete(recentServerCreates, k)
+		}
+	}
+}
+
+func tryRespondRecentServerCreate(w http.ResponseWriter, r *http.Request, servers store.ServerStore, dedupeKey string) bool {
+	recentServerCreateMu.Lock()
+	defer recentServerCreateMu.Unlock()
+	pruneRecentServerCreatesUnlocked()
+	if e, ok := recentServerCreates[dedupeKey]; ok && time.Since(e.created) < 90*time.Second {
+		view, err := servers.GetView(r.Context(), e.serverID)
+		if err != nil {
+			return false
+		}
+		log.Printf("[api] POST /servers: duplicate POST within 90s; returning existing serverID=%d", e.serverID)
+		writeJSON(w, http.StatusCreated, view)
+		return true
+	}
+	return false
+}
+
+func rememberRecentServerCreate(dedupeKey string, serverID int64) {
+	recentServerCreateMu.Lock()
+	defer recentServerCreateMu.Unlock()
+	recentServerCreates[dedupeKey] = recentServerCreateEntry{serverID: serverID, created: time.Now()}
+	pruneRecentServerCreatesUnlocked()
+}
+
+type httpAPIErr struct {
+	status  int
+	message string
+}
+
+func (e *httpAPIErr) Error() string {
+	return e.message
+}
+
+func apiHTTPError(status int, message string) error {
+	return &httpAPIErr{status: status, message: message}
+}
+
+// storeLicenseTypeFromDeployResponse maps deploy_license JSON license_type (trial|paid) to servers.license_type labels.
+func storeLicenseTypeFromDeployResponse(deploy deployCreateServerResponse, fallback string) string {
+	switch strings.ToLower(strings.TrimSpace(deploy.LicenseType)) {
+	case "trial":
+		return "Trial"
+	case "paid":
+		return "Enterprise"
+	}
+	fb := strings.TrimSpace(fallback)
+	if fb != "" {
+		return fb
+	}
+	return "Trial"
+}
+
+// performServerCreate runs deploy_license then persists the server. opCtx should tolerate client
+// disconnect (typically context.WithoutCancel(r.Context())).
+func performServerCreate(
+	opCtx context.Context,
+	cfg config.Config,
+	servers store.ServerStore,
+	payload serverCreatePayload,
+	deployTimeout int,
+) (store.ServerView, error) {
+	token, err := generateServerToken()
+	if err != nil {
+		log.Printf("[api] POST /servers: generate token failed: %v", err)
+		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to prepare server token")
+	}
+	deployBaseCtx := context.WithoutCancel(opCtx)
+	deployCtx, cancelDeploy := context.WithTimeout(deployBaseCtx, time.Duration(deployTimeout)*time.Second)
+	defer cancelDeploy()
+	deployResp, err := createDeployLicenseServer(deployCtx, cfg, payload, token)
+	if err != nil {
+		log.Printf("[api] POST /servers: deploy_license failed: %v", err)
+		return store.ServerView{}, apiHTTPError(http.StatusBadGateway, err.Error())
+	}
+	expireRaw := strings.TrimSpace(deployResp.DeployComplete.ExpireDate)
+	if expireRaw == "" {
+		expireRaw = strings.TrimSpace(deployResp.ExpireDate)
+	}
+	expiredAt, err := parseDeployExpireDate(expireRaw)
+	if err != nil {
+		log.Printf("[api] POST /servers: invalid expire_date from deploy_license raw=%q err=%v",
+			expireRaw, err)
+		return store.ServerView{}, apiHTTPError(http.StatusBadGateway, "deploy license returned invalid expire_date")
+	}
+	deployToken := strings.TrimSpace(deployResp.DeployComplete.Token)
+	if deployToken == "" {
+		deployToken = token
+	}
+	deployServiceStatus := strings.TrimSpace(deployResp.DeployComplete.ServerStatus)
+	if deployServiceStatus == "" {
+		deployServiceStatus = strings.TrimSpace(deployResp.ServerStatus)
+	}
+	rowStatus := strings.TrimSpace(payload.Status)
+	if rowStatus == "" {
+		rowStatus = "Normal"
+	}
+	deployVersion := strings.TrimSpace(deployResp.DeployComplete.Version)
+	if deployVersion == "" {
+		deployVersion = strings.TrimSpace(deployResp.Version)
+	}
+	storedLicenseType := storeLicenseTypeFromDeployResponse(deployResp, payload.LicenseType)
+	created, err := servers.Create(opCtx, store.ServerInput{
+		Name:           strings.TrimSpace(payload.Name),
+		IP:             strings.TrimSpace(payload.IP),
+		Status:         rowStatus,
+		ServiceStatus:  deployServiceStatus,
+		LicenseType:    storedLicenseType,
+		LicenseFile:    strings.TrimSpace(payload.LicenseFile),
+		Version:        deployVersion,
+		SSHUser:        strings.TrimSpace(payload.SSHUser),
+		SSHPassword:    strings.TrimSpace(payload.SSHPassword),
+		SSHPort:        strings.TrimSpace(payload.SSHPort),
+		Token:          deployToken,
+		Expired:        expiredAt,
+	})
+	if err != nil {
+		log.Printf("[api] POST /servers: DB Create failed: %v", err)
+		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to create server")
+	}
+	if err := servers.UpdateServerUsers(opCtx, created.ID, payload.UserIDs); err != nil {
+		log.Printf("[api] POST /servers: UpdateServerUsers serverID=%d failed: %v", created.ID, err)
+		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to assign server users")
+	}
+	if err := servers.UpdateDeploymentData(
+		opCtx,
+		created.ID,
+		deployToken,
+		"",
+		storedLicenseType,
+		deployVersion,
+		expiredAt,
+		deployServiceStatus,
+	); err != nil {
+		log.Printf("[api] POST /servers: UpdateDeploymentData serverID=%d failed: %v", created.ID, err)
+		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to persist deployment result")
+	}
+	view, err := servers.GetView(opCtx, created.ID)
+	if err != nil {
+		log.Printf("[api] POST /servers: GetView serverID=%d failed: %v", created.ID, err)
+		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to load server")
+	}
+	log.Printf("[api] POST /servers: success serverID=%d name=%q ip=%q version=%q deployDescriptionLen=%d",
+		created.ID, view.Name, view.IP, view.Version, len(deployResp.Description))
+	return view, nil
+}
+
 func registerRoutes(
 	mux *http.ServeMux,
+	cfg config.Config,
 	agentClient *AgentClient,
 	users store.UserStore,
 	servers store.ServerStore,
@@ -158,7 +360,7 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/get_blocklist_ips", getBlocklistIPsHandler(servers, l4Blacklist))
 	mux.HandleFunc("/api/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
 	mux.HandleFunc("/api/v1/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
-	mux.HandleFunc("/servers", serversHandler(servers))
+	mux.HandleFunc("/servers", serversHandler(cfg, servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(servers, blacklist))
 	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(servers, blacklist))
 	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
@@ -2046,7 +2248,7 @@ func loginHandler(users store.UserStore) http.HandlerFunc {
 	}
 }
 
-func serversHandler(servers store.ServerStore) http.HandlerFunc {
+func serversHandler(cfg config.Config, servers store.ServerStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -2059,33 +2261,76 @@ func serversHandler(servers store.ServerStore) http.HandlerFunc {
 		case http.MethodPost:
 			var payload serverCreatePayload
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				log.Printf("[api] POST /servers: invalid JSON: %v", err)
 				writeError(w, http.StatusBadRequest, "invalid JSON body")
 				return
 			}
-			created, err := servers.Create(r.Context(), store.ServerInput{
-				Name:        strings.TrimSpace(payload.Name),
-				IP:          strings.TrimSpace(payload.IP),
-				Status:      strings.TrimSpace(payload.Status),
-				LicenseType: strings.TrimSpace(payload.LicenseType),
-				LicenseFile: strings.TrimSpace(payload.LicenseFile),
-				Version:     strings.TrimSpace(payload.Version),
-				SSHUser:     strings.TrimSpace(payload.SSHUser),
-				SSHPassword: strings.TrimSpace(payload.SSHPassword),
-				SSHPort:     strings.TrimSpace(payload.SSHPort),
+			deployTimeout := cfg.DeployLicenseTimeoutSeconds
+			if deployTimeout <= 0 {
+				deployTimeout = 900
+			}
+			log.Printf("[api] POST /servers: begin name=%q ip=%q licenseType=%q sshUser=%q sshPort=%q userIds=%d licenseFileLen=%d deploy_license_client_timeout=%ds",
+				strings.TrimSpace(payload.Name),
+				strings.TrimSpace(payload.IP),
+				strings.TrimSpace(payload.LicenseType),
+				strings.TrimSpace(payload.SSHUser),
+				strings.TrimSpace(payload.SSHPort),
+				len(payload.UserIDs),
+				len(strings.TrimSpace(payload.LicenseFile)),
+				deployTimeout,
+			)
+			dedupeKey := serverCreateDedupeKey(payload)
+			if tryRespondRecentServerCreate(w, r, servers, dedupeKey) {
+				return
+			}
+
+			opCtx := context.WithoutCancel(r.Context())
+			idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+			if len(idemKey) > 128 {
+				idemKey = idemKey[:128]
+			}
+			if idemKey != "" {
+				log.Printf("[api] POST /servers: Idempotency-Key=%q dedupe_fingerprint_len=%d", idemKey, len(dedupeKey))
+			}
+
+			sfKey := "sf:" + dedupeKey
+			if len(sfKey) > 512 {
+				sfKey = sfKey[:512]
+			}
+
+			run := func() (store.ServerView, error) {
+				return performServerCreate(opCtx, cfg, servers, payload, deployTimeout)
+			}
+
+			var view store.ServerView
+			v, err, _ := serverCreateSingleflight.Do(sfKey, func() (interface{}, error) {
+				view0, err0 := run()
+				if err0 != nil {
+					return nil, err0
+				}
+				return view0, nil
 			})
+			var execErr error
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to create server")
+				execErr = err
+			} else {
+				var ok bool
+				view, ok = v.(store.ServerView)
+				if !ok {
+					execErr = fmt.Errorf("unexpected create response type %T", v)
+				}
+			}
+
+			if execErr != nil {
+				var he *httpAPIErr
+				if errors.As(execErr, &he) {
+					writeError(w, he.status, he.message)
+					return
+				}
+				writeError(w, http.StatusInternalServerError, execErr.Error())
 				return
 			}
-			if err := servers.UpdateServerUsers(r.Context(), created.ID, payload.UserIDs); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to assign server users")
-				return
-			}
-			view, err := servers.GetView(r.Context(), created.ID)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to load server")
-				return
-			}
+			rememberRecentServerCreate(dedupeKey, view.ID)
 			writeJSON(w, http.StatusCreated, view)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -2108,6 +2353,177 @@ type serverCreatePayload struct {
 	SSHPassword string  `json:"sshPassword"`
 	SSHPort     string  `json:"sshPort"`
 	UserIDs     []int64 `json:"userIds"`
+}
+
+type deployCreateServerRequest struct {
+	Name          string `json:"name"`
+	IP            string `json:"ip"`
+	User          string `json:"user"`
+	Pass          string `json:"pass"`
+	SSHPort       string `json:"ssh_port"`
+	LicenseType   string `json:"license_type"`
+	LicenseString string `json:"license_string,omitempty"`
+	Token         string `json:"token"`
+}
+
+type deployCreateServerResponse struct {
+	Description    string                 `json:"description"`
+	LicenseType    string                 `json:"license_type"`
+	Version        string                 `json:"version"`
+	ExpireDate     string                 `json:"expire_date"`
+	ServerStatus   string                 `json:"server_status"`
+	DeployComplete deployCompleteResponse `json:"deploy_complete"`
+}
+
+// normalizeDeployLicenseCreateResponse copies root-level fields from deploy_license
+// into deploy_complete when the nested object is empty (flat vs nested JSON).
+func normalizeDeployLicenseCreateResponse(d *deployCreateServerResponse) {
+	dc := &d.DeployComplete
+	if strings.TrimSpace(dc.Version) == "" {
+		dc.Version = strings.TrimSpace(d.Version)
+	}
+	if strings.TrimSpace(dc.ExpireDate) == "" {
+		dc.ExpireDate = strings.TrimSpace(d.ExpireDate)
+	}
+	if strings.TrimSpace(dc.ServerStatus) == "" {
+		dc.ServerStatus = strings.TrimSpace(d.ServerStatus)
+	}
+}
+
+// deployLicenseServiceLicenseType maps dashboard license labels to deploy_license /create_server values (trial | paid).
+// The UI uses "Enterprise" for an existing license file; deploy_license expects "paid".
+func deployLicenseServiceLicenseType(licenseType string) string {
+	switch strings.ToLower(strings.TrimSpace(licenseType)) {
+	case "trial":
+		return "trial"
+	case "enterprise", "professional", "paid":
+		return "paid"
+	default:
+		return strings.ToLower(strings.TrimSpace(licenseType))
+	}
+}
+
+type deployCompleteResponse struct {
+	Status       string `json:"status"`
+	IP           string `json:"ip"`
+	MachineID    string `json:"machine_id"`
+	Token        string `json:"token"`
+	Version      string `json:"version"`
+	ExpireDate   string `json:"expire_date"`
+	ServerStatus string `json:"server_status"`
+}
+
+func generateServerToken() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload serverCreatePayload, token string) (deployCreateServerResponse, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.DeployLicenseBaseURL), "/")
+	if baseURL == "" {
+		logDeployLicenseClientf("abort: DEPLOY_LICENSE_BASE_URL is empty")
+		return deployCreateServerResponse{}, errors.New("deploy license base url is not configured")
+	}
+	if _, err := url.ParseRequestURI(baseURL); err != nil {
+		logDeployLicenseClientf("abort: invalid base URL host parse err=%v", err)
+		return deployCreateServerResponse{}, errors.New("deploy license base url is invalid")
+	}
+
+	reqPayload := deployCreateServerRequest{
+		Name:          strings.TrimSpace(payload.Name),
+		IP:            strings.TrimSpace(payload.IP),
+		User:          strings.TrimSpace(payload.SSHUser),
+		Pass:          strings.TrimSpace(payload.SSHPassword),
+		SSHPort:       strings.TrimSpace(payload.SSHPort),
+		LicenseType:   deployLicenseServiceLicenseType(payload.LicenseType),
+		LicenseString: strings.TrimSpace(payload.LicenseFile),
+		Token:         token,
+	}
+	body, err := json.Marshal(reqPayload)
+	if err != nil {
+		logDeployLicenseClientf("encode request JSON failed: %v", err)
+		return deployCreateServerResponse{}, fmt.Errorf("encode deploy request: %w", err)
+	}
+
+	timeout := cfg.DeployLicenseTimeoutSeconds
+	if timeout <= 0 {
+		timeout = 900
+	}
+	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+
+	target := baseURL + "/create_server"
+	logDeployLicenseClientf("POST %s timeout=%ds jsonBytes=%d name=%q ip=%q sshUser=%q sshPort=%q license_type=%q license_string_len=%d token_prefix=%.6s…",
+		target, timeout, len(body),
+		reqPayload.Name, reqPayload.IP, reqPayload.User, reqPayload.SSHPort,
+		reqPayload.LicenseType, len(reqPayload.LicenseString), token)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		logDeployLicenseClientf("build request failed: %v", err)
+		return deployCreateServerResponse{}, fmt.Errorf("build deploy request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		logDeployLicenseClientf("HTTP Do error: %v", err)
+		return deployCreateServerResponse{}, fmt.Errorf("deploy create_server call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	limitedBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		logDeployLicenseClientf("read body error: %v status=%d", readErr, resp.StatusCode)
+		return deployCreateServerResponse{}, fmt.Errorf("read deploy response: %w", readErr)
+	}
+	bodyPreview := oneLineLogPreview(string(limitedBody), 480)
+	logDeployLicenseClientf("response status=%d bodyBytes=%d preview=%q",
+		resp.StatusCode, len(limitedBody), bodyPreview)
+	if resp.StatusCode != http.StatusOK {
+		return deployCreateServerResponse{}, fmt.Errorf("deploy create_server failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(limitedBody)))
+	}
+
+	var decoded deployCreateServerResponse
+	if err := json.Unmarshal(limitedBody, &decoded); err != nil {
+		logDeployLicenseClientf("JSON decode failed: %v preview=%q", err, bodyPreview)
+		return deployCreateServerResponse{}, fmt.Errorf("decode deploy response: %w", err)
+	}
+	normalizeDeployLicenseCreateResponse(&decoded)
+	logDeployLicenseClientf("decoded OK description_len=%d root_license_type=%q root_version=%q root_expire_date=%q root_server_status=%q deploy_complete.machine_id=%q token_len=%d version=%q expire_date=%q server_status=%q",
+		len(decoded.Description),
+		strings.TrimSpace(decoded.LicenseType),
+		strings.TrimSpace(decoded.Version),
+		strings.TrimSpace(decoded.ExpireDate),
+		strings.TrimSpace(decoded.ServerStatus),
+		decoded.DeployComplete.MachineID,
+		len(strings.TrimSpace(decoded.DeployComplete.Token)),
+		strings.TrimSpace(decoded.DeployComplete.Version),
+		strings.TrimSpace(decoded.DeployComplete.ExpireDate),
+		strings.TrimSpace(decoded.DeployComplete.ServerStatus),
+	)
+	return decoded, nil
+}
+
+func parseDeployExpireDate(raw string) (*time.Time, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	layouts := []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		parsed, err := time.Parse(layout, trimmed)
+		if err == nil {
+			return &parsed, nil
+		}
+	}
+	return nil, fmt.Errorf("unsupported expire_date format: %s", trimmed)
 }
 
 type serverUpdatePayload struct {

@@ -8,58 +8,63 @@ import (
 )
 
 type Config struct {
-	Port                       string
-	AllowedOrigins             []string
-	AllowAllCORS               bool
-	DBUser                     string
-	DBPassword                 string
-	DBHost                     string
-	DBPort                     string
-	DBName                     string
-	DSN                        string
-	RedisAddr                  string
-	RedisPassword              string
-	AgentScheme                string
-	AgentPort                  string
-	AgentL4Path                string
-	AgentL4OptionsPath         string
-	AgentToken                 string
-	AgentTimeoutSeconds        int
-	MetricsPort                string
-	MetricsBucketPath          string
-	MetricsIspBucketPath       string
-	MetricsCountryBucketPath   string
-	MetricsRefererBucketPath   string
-	MetricsURLBucketPath       string
-	MetricsServerTrafficPath   string
-	MetricsUserAgentBucketPath string
-	MetricsPollIntervalSeconds int
+	Port                        string
+	AllowedOrigins              []string
+	AllowAllCORS                bool
+	DBUser                      string
+	DBPassword                  string
+	DBHost                      string
+	DBPort                      string
+	DBName                      string
+	DSN                         string
+	RedisAddr                   string
+	RedisPassword               string
+	AgentScheme                 string
+	AgentPort                   string
+	AgentL4Path                 string
+	AgentL4OptionsPath          string
+	AgentToken                  string
+	AgentTimeoutSeconds         int
+	DeployLicenseBaseURL        string
+	DeployLicenseTimeoutSeconds int
+	MetricsPort                 string
+	MetricsBucketPath           string
+	MetricsIspBucketPath        string
+	MetricsCountryBucketPath    string
+	MetricsRefererBucketPath    string
+	MetricsURLBucketPath        string
+	MetricsServerTrafficPath    string
+	MetricsUserAgentBucketPath  string
+	MetricsPollIntervalSeconds  int
 }
 
 func Load() Config {
 	cfg := Config{
-		Port:                       "8080",
-		AllowAllCORS:               true,
-		DBUser:                     "root",
-		DBHost:                     "127.0.0.1",
-		DBPort:                     "3306",
-		DBName:                     "cdnproxy",
-		RedisAddr:                  "127.0.0.1:6379",
-		RedisPassword:              "",
-		AgentScheme:                "http",
-		AgentPort:                  "5000",
-		AgentL4Path:                "/API/L4/l4_firewall_data",
-		AgentL4OptionsPath:         "/API/L4/options",
-		AgentTimeoutSeconds:        3,
-		MetricsPort:                "9000",
-		MetricsBucketPath:          "/ip_request_stats",
-		MetricsIspBucketPath:       "/isp_request_stats",
-		MetricsCountryBucketPath:   "/country_request_stats",
-		MetricsRefererBucketPath:   "/referer_request_stats",
-		MetricsURLBucketPath:       "/url_request_stats",
-		MetricsServerTrafficPath:   "/server_traffic_stats",
-		MetricsUserAgentBucketPath: "/useragent_request_stats",
-		MetricsPollIntervalSeconds: 30,
+		Port:                        "8080",
+		AllowAllCORS:                true,
+		DBUser:                      "root",
+		DBHost:                      "127.0.0.1",
+		DBPort:                      "3306",
+		DBName:                      "cdnproxy",
+		RedisAddr:                   "127.0.0.1:6379",
+		RedisPassword:               "",
+		AgentScheme:                 "http",
+		AgentPort:                   "5000",
+		AgentL4Path:                 "/API/L4/l4_firewall_data",
+		AgentL4OptionsPath:          "/API/L4/options",
+		AgentTimeoutSeconds:         3,
+		DeployLicenseBaseURL:        "http://127.0.0.1:9090",
+		// Remote create_server runs SSH/SCP + deploy.sh; 30s is too short and causes duplicate deploys when clients retry.
+		DeployLicenseTimeoutSeconds: 900,
+		MetricsPort:                 "9000",
+		MetricsBucketPath:           "/ip_request_stats",
+		MetricsIspBucketPath:        "/isp_request_stats",
+		MetricsCountryBucketPath:    "/country_request_stats",
+		MetricsRefererBucketPath:    "/referer_request_stats",
+		MetricsURLBucketPath:        "/url_request_stats",
+		MetricsServerTrafficPath:    "/server_traffic_stats",
+		MetricsUserAgentBucketPath:  "/useragent_request_stats",
+		MetricsPollIntervalSeconds:  30,
 	}
 
 	configPath := strings.TrimSpace(os.Getenv("CONFIG_FILE"))
@@ -115,6 +120,14 @@ func Load() Config {
 	if timeoutRaw := strings.TrimSpace(os.Getenv("AGENT_TIMEOUT_SECONDS")); timeoutRaw != "" {
 		if parsed, err := strconv.Atoi(timeoutRaw); err == nil && parsed > 0 {
 			cfg.AgentTimeoutSeconds = parsed
+		}
+	}
+	if deployURL := strings.TrimSpace(os.Getenv("DEPLOY_LICENSE_BASE_URL")); deployURL != "" {
+		cfg.DeployLicenseBaseURL = deployURL
+	}
+	if timeoutRaw := strings.TrimSpace(os.Getenv("DEPLOY_LICENSE_TIMEOUT_SECONDS")); timeoutRaw != "" {
+		if parsed, err := strconv.Atoi(timeoutRaw); err == nil && parsed > 0 {
+			cfg.DeployLicenseTimeoutSeconds = parsed
 		}
 	}
 
@@ -173,32 +186,34 @@ func splitAndTrim(value string) []string {
 }
 
 type fileConfig struct {
-	Port                       *string  `json:"port"`
-	AllowedOrigins             []string `json:"allowedOrigins"`
-	AllowAllCORS               *bool    `json:"allowAllCors"`
-	DBUser                     *string  `json:"dbUser"`
-	DBPassword                 *string  `json:"dbPassword"`
-	DBHost                     *string  `json:"dbHost"`
-	DBPort                     *string  `json:"dbPort"`
-	DBName                     *string  `json:"dbName"`
-	DSN                        *string  `json:"dsn"`
-	RedisAddr                  *string  `json:"redisAddr"`
-	RedisPassword              *string  `json:"redisPassword"`
-	AgentScheme                *string  `json:"agentScheme"`
-	AgentPort                  *string  `json:"agentPort"`
-	AgentL4Path                *string  `json:"agentL4Path"`
-	AgentL4OptionsPath         *string  `json:"agentL4OptionsPath"`
-	AgentToken                 *string  `json:"agentToken"`
-	AgentTimeoutSeconds        *int     `json:"agentTimeoutSeconds"`
-	MetricsPort                *string  `json:"metricsPort"`
-	MetricsBucketPath          *string  `json:"metricsBucketPath"`
-	MetricsIspBucketPath       *string  `json:"metricsIspBucketPath"`
-	MetricsCountryBucketPath   *string  `json:"metricsCountryBucketPath"`
-	MetricsRefererBucketPath   *string  `json:"metricsRefererBucketPath"`
-	MetricsURLBucketPath       *string  `json:"metricsURLBucketPath"`
-	MetricsServerTrafficPath   *string  `json:"metricsServerTrafficPath"`
-	MetricsUserAgentBucketPath *string  `json:"metricsUserAgentBucketPath"`
-	MetricsPollIntervalSeconds *int     `json:"metricsPollIntervalSeconds"`
+	Port                        *string  `json:"port"`
+	AllowedOrigins              []string `json:"allowedOrigins"`
+	AllowAllCORS                *bool    `json:"allowAllCors"`
+	DBUser                      *string  `json:"dbUser"`
+	DBPassword                  *string  `json:"dbPassword"`
+	DBHost                      *string  `json:"dbHost"`
+	DBPort                      *string  `json:"dbPort"`
+	DBName                      *string  `json:"dbName"`
+	DSN                         *string  `json:"dsn"`
+	RedisAddr                   *string  `json:"redisAddr"`
+	RedisPassword               *string  `json:"redisPassword"`
+	AgentScheme                 *string  `json:"agentScheme"`
+	AgentPort                   *string  `json:"agentPort"`
+	AgentL4Path                 *string  `json:"agentL4Path"`
+	AgentL4OptionsPath          *string  `json:"agentL4OptionsPath"`
+	AgentToken                  *string  `json:"agentToken"`
+	AgentTimeoutSeconds         *int     `json:"agentTimeoutSeconds"`
+	DeployLicenseBaseURL        *string  `json:"deployLicenseBaseURL"`
+	DeployLicenseTimeoutSeconds *int     `json:"deployLicenseTimeoutSeconds"`
+	MetricsPort                 *string  `json:"metricsPort"`
+	MetricsBucketPath           *string  `json:"metricsBucketPath"`
+	MetricsIspBucketPath        *string  `json:"metricsIspBucketPath"`
+	MetricsCountryBucketPath    *string  `json:"metricsCountryBucketPath"`
+	MetricsRefererBucketPath    *string  `json:"metricsRefererBucketPath"`
+	MetricsURLBucketPath        *string  `json:"metricsURLBucketPath"`
+	MetricsServerTrafficPath    *string  `json:"metricsServerTrafficPath"`
+	MetricsUserAgentBucketPath  *string  `json:"metricsUserAgentBucketPath"`
+	MetricsPollIntervalSeconds  *int     `json:"metricsPollIntervalSeconds"`
 }
 
 func loadFileConfig(path string) (*fileConfig, error) {
@@ -267,6 +282,12 @@ func applyFileConfig(cfg *Config, fileCfg fileConfig) {
 	}
 	if fileCfg.AgentTimeoutSeconds != nil && *fileCfg.AgentTimeoutSeconds > 0 {
 		cfg.AgentTimeoutSeconds = *fileCfg.AgentTimeoutSeconds
+	}
+	if fileCfg.DeployLicenseBaseURL != nil && strings.TrimSpace(*fileCfg.DeployLicenseBaseURL) != "" {
+		cfg.DeployLicenseBaseURL = strings.TrimSpace(*fileCfg.DeployLicenseBaseURL)
+	}
+	if fileCfg.DeployLicenseTimeoutSeconds != nil && *fileCfg.DeployLicenseTimeoutSeconds > 0 {
+		cfg.DeployLicenseTimeoutSeconds = *fileCfg.DeployLicenseTimeoutSeconds
 	}
 	if fileCfg.MetricsPort != nil && strings.TrimSpace(*fileCfg.MetricsPort) != "" {
 		cfg.MetricsPort = strings.TrimSpace(*fileCfg.MetricsPort)

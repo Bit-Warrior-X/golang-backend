@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 )
 
@@ -14,6 +15,9 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
+	if status >= 500 {
+		log.Printf("[api] error response status=%d message=%s", status, message)
+	}
 	writeJSON(w, status, errorResponse{
 		Error:   http.StatusText(status),
 		Message: message,
