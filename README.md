@@ -60,9 +60,16 @@ CREATE TABLE IF NOT EXISTS servers (
   name VARCHAR(255),
   ip VARCHAR(255),
   status ENUM('Normal','Pause','Expired'),
+  service_status VARCHAR(32) NULL COMMENT 'angelos.service — shown as Angelos in UI',
+  l4_status VARCHAR(32) NULL COMMENT 'sparta.service — L4 dot',
+  l7_status VARCHAR(32) NULL COMMENT 'athens.service — L7 dot',
   license_type ENUM('Trial','L4','L7','Unified'),
   license_file VARCHAR(1024),
   version VARCHAR(50),
+  ssh_user VARCHAR(64),
+  ssh_password VARCHAR(255),
+  ssh_port INT,
+  token VARCHAR(255),
   created DATETIME,
   expired DATETIME
 );
@@ -98,6 +105,18 @@ If the `blacklist` table already exists without a `url` column, add it with:
 ```sql
 ALTER TABLE blacklist ADD COLUMN url VARCHAR(1024) NULL AFTER reason;
 ```
+
+### Existing databases — run migrations in order
+
+If the API logs `Unknown column 'l4_status'` or `failed to load servers`, apply:
+
+```bash
+mysql -u USER -p YOUR_DATABASE < scripts/add_servers_service_status.sql
+mysql -u USER -p YOUR_DATABASE < scripts/add_servers_layer_status.sql
+mysql -u USER -p YOUR_DATABASE < scripts/update_servers_license_type_enum.sql
+```
+
+`scripts/add_servers_layer_status.sql` is idempotent (adds `service_status`, `l4_status`, `l7_status` only when missing).
 
 ## Endpoints
 

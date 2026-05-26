@@ -187,10 +187,7 @@ func performServerCreate(
 	if deployToken == "" {
 		deployToken = token
 	}
-	deployServiceStatus := strings.TrimSpace(deployResp.DeployComplete.ServerStatus)
-	if deployServiceStatus == "" {
-		deployServiceStatus = strings.TrimSpace(deployResp.ServerStatus)
-	}
+	deployServiceStatus, deployL4Status, deployL7Status := deployRuntimeStatuses(deployResp)
 	rowStatus := strings.TrimSpace(payload.Status)
 	if rowStatus == "" {
 		rowStatus = "Normal"
@@ -205,6 +202,8 @@ func performServerCreate(
 		IP:             strings.TrimSpace(payload.IP),
 		Status:         rowStatus,
 		ServiceStatus:  deployServiceStatus,
+		L4Status:       deployL4Status,
+		L7Status:       deployL7Status,
 		LicenseType:    storedLicenseType,
 		LicenseFile:    strings.TrimSpace(payload.LicenseFile),
 		Version:        deployVersion,
@@ -231,6 +230,8 @@ func performServerCreate(
 		deployVersion,
 		expiredAt,
 		deployServiceStatus,
+		deployL4Status,
+		deployL7Status,
 	); err != nil {
 		log.Printf("[api] POST /servers: UpdateDeploymentData serverID=%d failed: %v", created.ID, err)
 		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to persist deployment result")
@@ -2379,6 +2380,8 @@ type deployCreateServerResponse struct {
 	Version        string                 `json:"version"`
 	ExpireDate     string                 `json:"expire_date"`
 	ServerStatus   string                 `json:"server_status"`
+	L4Status       string                 `json:"l4_status"`
+	L7Status       string                 `json:"l7_status"`
 	DeployComplete deployCompleteResponse `json:"deploy_complete"`
 }
 
@@ -2395,6 +2398,29 @@ func normalizeDeployLicenseCreateResponse(d *deployCreateServerResponse) {
 	if strings.TrimSpace(dc.ServerStatus) == "" {
 		dc.ServerStatus = strings.TrimSpace(d.ServerStatus)
 	}
+	if strings.TrimSpace(dc.L4Status) == "" {
+		dc.L4Status = strings.TrimSpace(d.L4Status)
+	}
+	if strings.TrimSpace(dc.L7Status) == "" {
+		dc.L7Status = strings.TrimSpace(d.L7Status)
+	}
+}
+
+func deployRuntimeStatuses(resp deployCreateServerResponse) (angelos, l4, l7 string) {
+	normalizeDeployLicenseCreateResponse(&resp)
+	angelos = strings.TrimSpace(resp.DeployComplete.ServerStatus)
+	if angelos == "" {
+		angelos = strings.TrimSpace(resp.ServerStatus)
+	}
+	l4 = strings.TrimSpace(resp.DeployComplete.L4Status)
+	if l4 == "" {
+		l4 = strings.TrimSpace(resp.L4Status)
+	}
+	l7 = strings.TrimSpace(resp.DeployComplete.L7Status)
+	if l7 == "" {
+		l7 = strings.TrimSpace(resp.L7Status)
+	}
+	return angelos, l4, l7
 }
 
 // deployLicenseServiceLicenseType maps dashboard license labels
@@ -2429,6 +2455,8 @@ type deployCompleteResponse struct {
 	Version      string `json:"version"`
 	ExpireDate   string `json:"expire_date"`
 	ServerStatus string `json:"server_status"`
+	L4Status     string `json:"l4_status"`
+	L7Status     string `json:"l7_status"`
 }
 
 func generateServerToken() (string, error) {
@@ -2783,17 +2811,14 @@ func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Conf
 		writeError(w, http.StatusBadGateway, "deploy license returned invalid expire_date")
 		return
 	}
-	deployServiceStatus := strings.TrimSpace(deployResp.DeployComplete.ServerStatus)
-	if deployServiceStatus == "" {
-		deployServiceStatus = strings.TrimSpace(deployResp.ServerStatus)
-	}
+	deployServiceStatus, deployL4Status, deployL7Status := deployRuntimeStatuses(deployResp)
 	deployVersion := strings.TrimSpace(deployResp.DeployComplete.Version)
 	if deployVersion == "" {
 		deployVersion = strings.TrimSpace(deployResp.Version)
 	}
 	storedLicenseType := storeLicenseTypeFromDeployResponse(deployResp, view.License)
 	tok := strings.TrimSpace(view.Token)
-	if err := servers.UpdateDeploymentData(r.Context(), serverID, tok, "", storedLicenseType, deployVersion, expiredAt, deployServiceStatus); err != nil {
+	if err := servers.UpdateDeploymentData(r.Context(), serverID, tok, "", storedLicenseType, deployVersion, expiredAt, deployServiceStatus, deployL4Status, deployL7Status); err != nil {
 		log.Printf("[api] POST /servers/%d/upgrade: UpdateDeploymentData failed: %v", serverID, err)
 		writeError(w, http.StatusInternalServerError, "failed to persist upgrade result")
 		return
@@ -2857,17 +2882,14 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 		writeError(w, http.StatusBadGateway, "deploy license returned invalid expire_date")
 		return
 	}
-	deployServiceStatus := strings.TrimSpace(deployResp.DeployComplete.ServerStatus)
-	if deployServiceStatus == "" {
-		deployServiceStatus = strings.TrimSpace(deployResp.ServerStatus)
-	}
+	deployServiceStatus, deployL4Status, deployL7Status := deployRuntimeStatuses(deployResp)
 	deployVersion := strings.TrimSpace(deployResp.DeployComplete.Version)
 	if deployVersion == "" {
 		deployVersion = strings.TrimSpace(deployResp.Version)
 	}
 	storedLicenseType := storeLicenseTypeFromDeployResponse(deployResp, licenseType)
 	tok := strings.TrimSpace(view.Token)
-	if err := servers.UpdateDeploymentData(r.Context(), serverID, tok, "", storedLicenseType, deployVersion, expiredAt, deployServiceStatus); err != nil {
+	if err := servers.UpdateDeploymentData(r.Context(), serverID, tok, "", storedLicenseType, deployVersion, expiredAt, deployServiceStatus, deployL4Status, deployL7Status); err != nil {
 		log.Printf("[api] POST /servers/%d/upgrade-license: UpdateDeploymentData failed: %v", serverID, err)
 		writeError(w, http.StatusInternalServerError, "failed to persist upgrade result")
 		return
