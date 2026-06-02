@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS servers (
   license_type ENUM('Trial','L4','L7','Unified'),
   license_file VARCHAR(1024),
   version VARCHAR(50),
+  os VARCHAR(64) NULL COMMENT 'Target OS label from product build, e.g. ubuntu-22.04',
   ssh_user VARCHAR(64),
   ssh_password VARCHAR(255),
   ssh_port INT,

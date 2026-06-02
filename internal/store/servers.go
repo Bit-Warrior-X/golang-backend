@@ -22,6 +22,7 @@ type Server struct {
 	LicenseType    string
 	LicenseFile    string
 	Version        string
+	OS             string
 	SSHUser        string
 	SSHPassword    string
 	SSHPort        string
@@ -43,6 +44,7 @@ type ServerView struct {
 	License        string   `json:"license"`
 	LicenseFile    string   `json:"licenseFile"`
 	Version        string   `json:"version"`
+	OS             string   `json:"os,omitempty"`
 	SSHUser        string   `json:"sshUser"`
 	SSHPassword    string   `json:"sshPassword"`
 	SSHPort        string   `json:"sshPort"`
@@ -64,6 +66,7 @@ type ServerInput struct {
 	LicenseType    string
 	LicenseFile    string
 	Version        string
+	OS             string
 	SSHUser        string
 	SSHPassword    string
 	SSHPort        string
@@ -79,7 +82,7 @@ type ServerStore interface {
 	Create(ctx context.Context, input ServerInput) (Server, error)
 	GetView(ctx context.Context, serverID int64) (ServerView, error)
 	GetByToken(ctx context.Context, token string) (Server, error)
-	UpdateDeploymentData(ctx context.Context, serverID int64, token, rowStatus, licenseType, version string, expired *time.Time, serviceStatus, l4Status, l7Status string) error
+	UpdateDeploymentData(ctx context.Context, serverID int64, token, rowStatus, licenseType, version, os string, expired *time.Time, serviceStatus, l4Status, l7Status string) error
 	Update(ctx context.Context, serverID int64, input ServerInput) error
 	Delete(ctx context.Context, serverID int64) error
 }
@@ -135,6 +138,7 @@ func (store *serverStore) ListWithUsers(ctx context.Context) ([]ServerView, erro
 			License:        server.LicenseType,
 			LicenseFile:    server.LicenseFile,
 			Version:        server.Version,
+			OS:             server.OS,
 			SSHUser:        server.SSHUser,
 			SSHPassword:    server.SSHPassword,
 			SSHPort:        server.SSHPort,
@@ -185,6 +189,11 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 	if versionTrim != "" {
 		versionInsert = versionTrim
 	}
+	osTrim := strings.TrimSpace(input.OS)
+	var osInsert any
+	if osTrim != "" {
+		osInsert = osTrim
+	}
 
 	var expired sql.NullTime
 	if input.Expired != nil {
@@ -192,8 +201,8 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 	}
 
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO servers (name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO servers (name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, os, ssh_user, ssh_password, ssh_port, token, created, expired)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullableServerString(input.Name),
 		nullableServerString(input.IP),
 		status,
@@ -203,6 +212,7 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 		licenseType,
 		nullableServerString(input.LicenseFile),
 		versionInsert,
+		osInsert,
 		nullableServerString(input.SSHUser),
 		nullableServerString(input.SSHPassword),
 		nullableServerInt(input.SSHPort),
@@ -230,6 +240,7 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 		LicenseType:    licenseType,
 		LicenseFile:    input.LicenseFile,
 		Version:        versionTrim,
+		OS:             osTrim,
 		SSHUser:        input.SSHUser,
 		SSHPassword:    input.SSHPassword,
 		SSHPort:        input.SSHPort,
@@ -239,7 +250,7 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 	}, nil
 }
 
-func (store *serverStore) UpdateDeploymentData(ctx context.Context, serverID int64, token, rowStatus, licenseType, version string, expired *time.Time, serviceStatus, l4Status, l7Status string) error {
+func (store *serverStore) UpdateDeploymentData(ctx context.Context, serverID int64, token, rowStatus, licenseType, version, os string, expired *time.Time, serviceStatus, l4Status, l7Status string) error {
 	var expiredValue sql.NullTime
 	if expired != nil {
 		expiredValue = sql.NullTime{Time: *expired, Valid: true}
@@ -254,6 +265,7 @@ func (store *serverStore) UpdateDeploymentData(ctx context.Context, serverID int
 			l7_status = COALESCE(NULLIF(?, ''), l7_status),
 			license_type = COALESCE(NULLIF(?, ''), license_type),
 			version = COALESCE(NULLIF(?, ''), version),
+			os = COALESCE(NULLIF(?, ''), os),
 			expired = COALESCE(?, expired)
 		WHERE id = ?`,
 		nullableServerString(token),
@@ -263,6 +275,7 @@ func (store *serverStore) UpdateDeploymentData(ctx context.Context, serverID int
 		strings.TrimSpace(l7Status),
 		strings.TrimSpace(licenseType),
 		strings.TrimSpace(version),
+		strings.TrimSpace(os),
 		expiredValue,
 		serverID,
 	)
@@ -331,6 +344,7 @@ func (store *serverStore) GetView(ctx context.Context, serverID int64) (ServerVi
 		License:        server.LicenseType,
 		LicenseFile:    server.LicenseFile,
 		Version:        server.Version,
+		OS:             server.OS,
 		SSHUser:        server.SSHUser,
 		SSHPassword:    server.SSHPassword,
 		SSHPort:        server.SSHPort,
@@ -377,7 +391,7 @@ func (store *serverStore) UpdateServerUsers(ctx context.Context, serverID int64,
 
 func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
+		SELECT id, name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, os, ssh_user, ssh_password, ssh_port, token, created, expired
 		FROM servers
 		ORDER BY id DESC`)
 	if err != nil {
@@ -397,6 +411,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 		var licenseType sql.NullString
 		var licenseFile sql.NullString
 		var version sql.NullString
+		var osLabel sql.NullString
 		var sshUser sql.NullString
 		var sshPassword sql.NullString
 		var sshPort sql.NullInt64
@@ -412,6 +427,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 			&licenseType,
 			&licenseFile,
 			&version,
+			&osLabel,
 			&sshUser,
 			&sshPassword,
 			&sshPort,
@@ -430,6 +446,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 		item.LicenseType = nullStringValue(licenseType)
 		item.LicenseFile = nullStringValue(licenseFile)
 		item.Version = nullStringValue(version)
+		item.OS = nullStringValue(osLabel)
 		item.SSHUser = nullStringValue(sshUser)
 		item.SSHPassword = nullStringValue(sshPassword)
 		item.SSHPort = nullIntStringValue(sshPort)
@@ -444,7 +461,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 
 func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
+		SELECT id, name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, os, ssh_user, ssh_password, ssh_port, token, created, expired
 		FROM servers
 		WHERE id = ?`, serverID)
 
@@ -458,6 +475,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 	var licenseType sql.NullString
 	var licenseFile sql.NullString
 	var version sql.NullString
+	var osLabel sql.NullString
 	var sshUser sql.NullString
 	var sshPassword sql.NullString
 	var sshPort sql.NullInt64
@@ -473,6 +491,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 		&licenseType,
 		&licenseFile,
 		&version,
+		&osLabel,
 		&sshUser,
 		&sshPassword,
 		&sshPort,
@@ -492,6 +511,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 	item.LicenseType = nullStringValue(licenseType)
 	item.LicenseFile = nullStringValue(licenseFile)
 	item.Version = nullStringValue(version)
+	item.OS = nullStringValue(osLabel)
 	item.SSHUser = nullStringValue(sshUser)
 	item.SSHPassword = nullStringValue(sshPassword)
 	item.SSHPort = nullIntStringValue(sshPort)

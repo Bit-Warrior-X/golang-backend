@@ -76,6 +76,8 @@ func serverCreateDedupeKey(payload serverCreatePayload) string {
 	b.WriteByte('|')
 	b.WriteString(strings.TrimSpace(payload.LicenseFile))
 	b.WriteByte('|')
+	b.WriteString(strings.TrimSpace(payload.VersionUUID))
+	b.WriteByte('|')
 	for i, id := range ids {
 		if i > 0 {
 			b.WriteByte(',')
@@ -160,6 +162,9 @@ func performServerCreate(
 	payload serverCreatePayload,
 	deployTimeout int,
 ) (store.ServerView, error) {
+	if strings.TrimSpace(payload.VersionUUID) == "" {
+		return store.ServerView{}, apiHTTPError(http.StatusBadRequest, "versionUuid is required")
+	}
 	token, err := generateServerToken()
 	if err != nil {
 		log.Printf("[api] POST /servers: generate token failed: %v", err)
@@ -196,6 +201,10 @@ func performServerCreate(
 	if deployVersion == "" {
 		deployVersion = strings.TrimSpace(deployResp.Version)
 	}
+	deployOS := deployProductOS(deployResp)
+	if deployOS == "" {
+		deployOS = strings.TrimSpace(payload.OS)
+	}
 	storedLicenseType := storeLicenseTypeFromDeployResponse(deployResp, payload.LicenseType)
 	created, err := servers.Create(opCtx, store.ServerInput{
 		Name:           strings.TrimSpace(payload.Name),
@@ -207,6 +216,7 @@ func performServerCreate(
 		LicenseType:    storedLicenseType,
 		LicenseFile:    strings.TrimSpace(payload.LicenseFile),
 		Version:        deployVersion,
+		OS:             deployOS,
 		SSHUser:        strings.TrimSpace(payload.SSHUser),
 		SSHPassword:    strings.TrimSpace(payload.SSHPassword),
 		SSHPort:        strings.TrimSpace(payload.SSHPort),
@@ -228,6 +238,7 @@ func performServerCreate(
 		"",
 		storedLicenseType,
 		deployVersion,
+		deployOS,
 		expiredAt,
 		deployServiceStatus,
 		deployL4Status,
@@ -2351,16 +2362,18 @@ type serverUsersPayload struct {
 }
 
 type serverCreatePayload struct {
-	Name        string  `json:"name"`
-	IP          string  `json:"ip"`
-	Status      string  `json:"status"`
-	LicenseType string  `json:"licenseType"`
-	LicenseFile string  `json:"licenseFile"`
-	Version     string  `json:"version"`
-	SSHUser     string  `json:"sshUser"`
-	SSHPassword string  `json:"sshPassword"`
-	SSHPort     string  `json:"sshPort"`
-	UserIDs     []int64 `json:"userIds"`
+	Name          string  `json:"name"`
+	IP            string  `json:"ip"`
+	Status        string  `json:"status"`
+	LicenseType   string  `json:"licenseType"`
+	LicenseFile   string  `json:"licenseFile"`
+	Version       string  `json:"version"`
+	VersionUUID   string  `json:"versionUuid"`
+	OS            string  `json:"os"`
+	SSHUser       string  `json:"sshUser"`
+	SSHPassword   string  `json:"sshPassword"`
+	SSHPort       string  `json:"sshPort"`
+	UserIDs       []int64 `json:"userIds"`
 }
 
 type deployCreateServerRequest struct {
@@ -2372,17 +2385,37 @@ type deployCreateServerRequest struct {
 	LicenseType   string `json:"license_type"`
 	LicenseString string `json:"license_string,omitempty"`
 	Token         string `json:"token"`
+	VersionUUID   string `json:"version_uuid,omitempty"`
+}
+
+type deployDorianVersion struct {
+	Version  string `json:"version"`
+	OS       string `json:"os"`
+	FullName string `json:"full_name"`
+	UUID     string `json:"uuid"`
 }
 
 type deployCreateServerResponse struct {
 	Description    string                 `json:"description"`
 	LicenseType    string                 `json:"license_type"`
 	Version        string                 `json:"version"`
+	OS             string                 `json:"os"`
 	ExpireDate     string                 `json:"expire_date"`
 	ServerStatus   string                 `json:"server_status"`
 	L4Status       string                 `json:"l4_status"`
 	L7Status       string                 `json:"l7_status"`
+	DorianVersion  deployDorianVersion    `json:"dorian_version"`
 	DeployComplete deployCompleteResponse `json:"deploy_complete"`
+}
+
+func deployProductOS(resp deployCreateServerResponse) string {
+	if os := strings.TrimSpace(resp.OS); os != "" {
+		return os
+	}
+	if os := strings.TrimSpace(resp.DorianVersion.OS); os != "" {
+		return os
+	}
+	return ""
 }
 
 // normalizeDeployLicenseCreateResponse copies root-level fields from deploy_license
@@ -2487,6 +2520,7 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 		LicenseType:   deployLicenseServiceLicenseType(payload.LicenseType),
 		LicenseString: strings.TrimSpace(payload.LicenseFile),
 		Token:         token,
+		VersionUUID:   strings.TrimSpace(payload.VersionUUID),
 	}
 	body, err := json.Marshal(reqPayload)
 	if err != nil {
@@ -2554,11 +2588,12 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 }
 
 type deployLicenseVersionItem struct {
-	UUID     string `json:"uuid"`
-	Version  string `json:"version"`
-	FullName string `json:"full_name"`
-	Path     string `json:"path,omitempty"`
-	Updated  any    `json:"updated,omitempty"`
+	UUID     string  `json:"uuid"`
+	Version  string  `json:"version"`
+	OS       *string `json:"os"`
+	FullName string  `json:"full_name"`
+	Path     string  `json:"path,omitempty"`
+	Updated  any     `json:"updated,omitempty"`
 }
 
 type deployLicenseVersionsEnvelope struct {
@@ -2816,9 +2851,10 @@ func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Conf
 	if deployVersion == "" {
 		deployVersion = strings.TrimSpace(deployResp.Version)
 	}
+	deployOS := deployProductOS(deployResp)
 	storedLicenseType := storeLicenseTypeFromDeployResponse(deployResp, view.License)
 	tok := strings.TrimSpace(view.Token)
-	if err := servers.UpdateDeploymentData(r.Context(), serverID, tok, "", storedLicenseType, deployVersion, expiredAt, deployServiceStatus, deployL4Status, deployL7Status); err != nil {
+	if err := servers.UpdateDeploymentData(r.Context(), serverID, tok, "", storedLicenseType, deployVersion, deployOS, expiredAt, deployServiceStatus, deployL4Status, deployL7Status); err != nil {
 		log.Printf("[api] POST /servers/%d/upgrade: UpdateDeploymentData failed: %v", serverID, err)
 		writeError(w, http.StatusInternalServerError, "failed to persist upgrade result")
 		return
@@ -2889,7 +2925,7 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 	}
 	storedLicenseType := storeLicenseTypeFromDeployResponse(deployResp, licenseType)
 	tok := strings.TrimSpace(view.Token)
-	if err := servers.UpdateDeploymentData(r.Context(), serverID, tok, "", storedLicenseType, deployVersion, expiredAt, deployServiceStatus, deployL4Status, deployL7Status); err != nil {
+	if err := servers.UpdateDeploymentData(r.Context(), serverID, tok, "", storedLicenseType, deployVersion, "", expiredAt, deployServiceStatus, deployL4Status, deployL7Status); err != nil {
 		log.Printf("[api] POST /servers/%d/upgrade-license: UpdateDeploymentData failed: %v", serverID, err)
 		writeError(w, http.StatusInternalServerError, "failed to persist upgrade result")
 		return
