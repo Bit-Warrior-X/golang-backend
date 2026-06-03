@@ -192,7 +192,13 @@ func performServerCreate(
 	if deployToken == "" {
 		deployToken = token
 	}
-	deployServiceStatus, deployL4Status, deployL7Status := deployRuntimeStatuses(deployResp)
+	deployServiceStatus, deployL4Status, deployL7Status := probeRemoteRuntimeStatuses(
+		opCtx,
+		strings.TrimSpace(payload.IP),
+		strings.TrimSpace(payload.SSHUser),
+		strings.TrimSpace(payload.SSHPassword),
+		strings.TrimSpace(payload.SSHPort),
+	)
 	rowStatus := strings.TrimSpace(payload.Status)
 	if rowStatus == "" {
 		rowStatus = "Normal"
@@ -252,8 +258,8 @@ func performServerCreate(
 		log.Printf("[api] POST /servers: GetView serverID=%d failed: %v", created.ID, err)
 		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to load server")
 	}
-	log.Printf("[api] POST /servers: success serverID=%d name=%q ip=%q version=%q deployDescriptionLen=%d",
-		created.ID, view.Name, view.IP, view.Version, len(deployResp.Description))
+	log.Printf("[api] POST /servers: success serverID=%d name=%q ip=%q version=%q angelos=%q l4=%q l7=%q",
+		created.ID, view.Name, view.IP, view.Version, deployServiceStatus, deployL4Status, deployL7Status)
 	return view, nil
 }
 
@@ -2439,23 +2445,6 @@ func normalizeDeployLicenseCreateResponse(d *deployCreateServerResponse) {
 	}
 }
 
-func deployRuntimeStatuses(resp deployCreateServerResponse) (angelos, l4, l7 string) {
-	normalizeDeployLicenseCreateResponse(&resp)
-	angelos = strings.TrimSpace(resp.DeployComplete.ServerStatus)
-	if angelos == "" {
-		angelos = strings.TrimSpace(resp.ServerStatus)
-	}
-	l4 = strings.TrimSpace(resp.DeployComplete.L4Status)
-	if l4 == "" {
-		l4 = strings.TrimSpace(resp.L4Status)
-	}
-	l7 = strings.TrimSpace(resp.DeployComplete.L7Status)
-	if l7 == "" {
-		l7 = strings.TrimSpace(resp.L7Status)
-	}
-	return angelos, l4, l7
-}
-
 // deployLicenseServiceLicenseType maps dashboard license labels
 // (Trial | L4 | L7 | Unified) to deploy_license /create_server values
 // (trial | l4 | l7 | unified). Comparison is case-insensitive.
@@ -2572,17 +2561,13 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 		return deployCreateServerResponse{}, fmt.Errorf("decode deploy response: %w", err)
 	}
 	normalizeDeployLicenseCreateResponse(&decoded)
-	logDeployLicenseClientf("decoded OK description_len=%d root_license_type=%q root_version=%q root_expire_date=%q root_server_status=%q deploy_complete.machine_id=%q token_len=%d version=%q expire_date=%q server_status=%q",
+	logDeployLicenseClientf("decoded OK description_len=%d root_license_type=%q root_version=%q root_server_status=%q root_l4_status=%q root_l7_status=%q",
 		len(decoded.Description),
 		strings.TrimSpace(decoded.LicenseType),
 		strings.TrimSpace(decoded.Version),
-		strings.TrimSpace(decoded.ExpireDate),
 		strings.TrimSpace(decoded.ServerStatus),
-		decoded.DeployComplete.MachineID,
-		len(strings.TrimSpace(decoded.DeployComplete.Token)),
-		strings.TrimSpace(decoded.DeployComplete.Version),
-		strings.TrimSpace(decoded.DeployComplete.ExpireDate),
-		strings.TrimSpace(decoded.DeployComplete.ServerStatus),
+		strings.TrimSpace(decoded.L4Status),
+		strings.TrimSpace(decoded.L7Status),
 	)
 	return decoded, nil
 }
@@ -2800,6 +2785,58 @@ type serverUpgradeRequestBody struct {
 	VersionUUID string `json:"versionUuid"`
 }
 
+func handleServerRefreshRuntimeStatus(w http.ResponseWriter, r *http.Request, cfg config.Config, servers store.ServerStore, serverID int64) {
+	view, err := servers.GetView(r.Context(), serverID)
+	if err != nil {
+		if store.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "server not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load server")
+		return
+	}
+	deployServiceStatus, deployL4Status, deployL7Status := probeRemoteRuntimeStatuses(
+		r.Context(),
+		view.IP,
+		view.SSHUser,
+		view.SSHPassword,
+		view.SSHPort,
+	)
+	tok := strings.TrimSpace(view.Token)
+	if err := servers.UpdateDeploymentData(
+		r.Context(),
+		serverID,
+		tok,
+		"",
+		"",
+		"",
+		"",
+		nil,
+		deployServiceStatus,
+		deployL4Status,
+		deployL7Status,
+	); err != nil {
+		log.Printf("[api] POST /servers/%d/refresh-runtime-status: UpdateDeploymentData failed: %v", serverID, err)
+		writeError(w, http.StatusInternalServerError, "failed to persist runtime status")
+		return
+	}
+	outView, err := servers.GetView(r.Context(), serverID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load server")
+		return
+	}
+	log.Printf("[api] POST /servers/%d/refresh-runtime-status: ssh_target=%s@%s:%s angelos=%q l4=%q l7=%q",
+		serverID,
+		strings.TrimSpace(view.SSHUser),
+		strings.TrimSpace(view.IP),
+		strings.TrimSpace(view.SSHPort),
+		outView.ServiceStatus,
+		outView.L4Status,
+		outView.L7Status,
+	)
+	writeJSON(w, http.StatusOK, outView)
+}
+
 func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Config, servers store.ServerStore, serverID int64) {
 	var body serverUpgradeRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -2846,7 +2883,13 @@ func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Conf
 		writeError(w, http.StatusBadGateway, "deploy license returned invalid expire_date")
 		return
 	}
-	deployServiceStatus, deployL4Status, deployL7Status := deployRuntimeStatuses(deployResp)
+	deployServiceStatus, deployL4Status, deployL7Status := probeRemoteRuntimeStatuses(
+		r.Context(),
+		view.IP,
+		view.SSHUser,
+		view.SSHPassword,
+		view.SSHPort,
+	)
 	deployVersion := strings.TrimSpace(deployResp.DeployComplete.Version)
 	if deployVersion == "" {
 		deployVersion = strings.TrimSpace(deployResp.Version)
@@ -2918,7 +2961,13 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 		writeError(w, http.StatusBadGateway, "deploy license returned invalid expire_date")
 		return
 	}
-	deployServiceStatus, deployL4Status, deployL7Status := deployRuntimeStatuses(deployResp)
+	deployServiceStatus, deployL4Status, deployL7Status := probeRemoteRuntimeStatuses(
+		r.Context(),
+		view.IP,
+		view.SSHUser,
+		view.SSHPassword,
+		view.SSHPort,
+	)
 	deployVersion := strings.TrimSpace(deployResp.DeployComplete.Version)
 	if deployVersion == "" {
 		deployVersion = strings.TrimSpace(deployResp.Version)
@@ -4071,6 +4120,20 @@ func serverDetailHandler(
 	upstreamServers store.UpstreamServerStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/refresh-runtime-status") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/refresh-runtime-status")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			handleServerRefreshRuntimeStatus(w, r, cfg, servers, serverID)
+			return
+		}
+
 		if strings.HasSuffix(r.URL.Path, "/upgrade-license") {
 			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/upgrade-license")
 			if !ok {

@@ -676,6 +676,8 @@ func normalizeStatus(status string) (string, string) {
 		return "Deployed", "deployed"
 	case "stopped":
 		return "Stopped", "stopped"
+	case "unknown":
+		return "Unknown", "unknown"
 	default:
 		return status, "inactive"
 	}
