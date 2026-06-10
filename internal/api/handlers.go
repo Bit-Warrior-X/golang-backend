@@ -4203,6 +4203,48 @@ func serverDetailHandler(
 	upstreamServers store.UpstreamServerStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/host-metrics") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/host-metrics")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			handleServerHostMetrics(w, r, servers, serverID)
+			return
+		}
+
+		if strings.HasSuffix(r.URL.Path, "/host-power") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/host-power")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			handleServerHostPower(w, r, servers, serverID)
+			return
+		}
+
+		if strings.HasSuffix(r.URL.Path, "/service-control") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/service-control")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			handleServerServiceControl(w, r, cfg, servers, serverID)
+			return
+		}
+
 		if strings.HasSuffix(r.URL.Path, "/refresh-runtime-status") {
 			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/refresh-runtime-status")
 			if !ok {

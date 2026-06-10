@@ -1,0 +1,6 @@
+{
+  "allowedOrigins": [
+    "https://panel.dorian.center",
+    "http://panel.dorian.center"
+  ]
+}
